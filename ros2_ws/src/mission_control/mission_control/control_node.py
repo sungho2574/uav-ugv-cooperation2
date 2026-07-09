@@ -36,7 +36,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from mission_control.coverage_plan import plan_coverage
-from mission_control.zone_split import assign_zones_to_drones, build_free_space
+from mission_control.zone_split import assign_cells_to_drones, build_cells
 
 LATCHED_QOS = QoSProfile(
     depth=1,
@@ -263,30 +263,35 @@ class ControlNode(Node):
         dead_zones = [
             [tuple(p) for p in dz['points']] for dz in self.mission_map.get('dead_zones', [])
         ]
-        self.free_space = build_free_space(boundary, dead_zones, self.dead_zone_margin)
-        self.zone_geoms = assign_zones_to_drones(self.free_space, self.mission_map['drones'])
+        cells = build_cells(
+            boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
+        self.zone_cells = assign_cells_to_drones(cells, self.mission_map['drones'])
 
     def _do_plan(self):
         for drone_id, handle in self.drones.items():
-            zone_geom = self.zone_geoms[drone_id]
+            cells = self.zone_cells[drone_id]
             start_xy = (handle.home_position[0], handle.home_position[1])
-            handle.waypoints = plan_coverage(zone_geom, self.coverage_line_spacing, start_xy)
+            handle.waypoints = plan_coverage(cells, start_xy)
             handle.arrived_index = 0
             handle.pending_index = 0
             handle.done = len(handle.waypoints) <= 1  # index 0 is home itself, nothing to fly
 
     def _publish_plan(self):
+        # Zone is visualized as one small square per assigned cell (rather than
+        # a single merged polygon) -- matches the cell-based decomposition
+        # itself and needs no polygon geometry to build.
+        half = self.coverage_line_spacing / 2.0
         zone_array = ZoneAssignmentArray()
-        for drone_id, geom in self.zone_geoms.items():
-            polys = list(geom.geoms) if geom.geom_type == 'MultiPolygon' else [geom]
+        for drone_id, cells in self.zone_cells.items():
             za = ZoneAssignment(drone_id=drone_id)
-            for poly in polys:
-                if poly.is_empty:
-                    continue
+            for cell in cells:
+                cx, cy = cell['x'], cell['y']
                 pmsg = PolygonMsg()
                 pmsg.points = [
-                    Point32(x=float(x), y=float(y), z=0.0)
-                    for x, y in poly.exterior.coords
+                    Point32(x=float(cx - half), y=float(cy - half), z=0.0),
+                    Point32(x=float(cx + half), y=float(cy - half), z=0.0),
+                    Point32(x=float(cx + half), y=float(cy + half), z=0.0),
+                    Point32(x=float(cx - half), y=float(cy + half), z=0.0),
                 ]
                 za.polygons.append(pmsg)
             zone_array.zones.append(za)

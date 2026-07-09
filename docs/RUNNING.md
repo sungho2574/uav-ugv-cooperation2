@@ -55,7 +55,7 @@ source install/setup.bash
 `ros2_ws/src/mission_bringup/config/crazyflies.yaml` 확인:
 
 - [ ] `robots` 아래 각 드론의 `uri`(라디오 채널/주소)가 실제 장비와 일치하는지
-- [ ] `initial_position`이 `mission_map.yaml`의 `home_position`과 일치하는지 (다르면 시뮬 좌표계와 실제 좌표계가 어긋남)
+- [ ] `initial_position`은 런치 시점에 `mission_map.yaml`의 `home_position`으로 **자동 덮어쓰기** 되므로 이 파일에 직접 적힌 값은 신경 쓸 필요 없음(README 9절 참고) — 실기체라면 그래도 물리적으로 드론을 그 `home_position` 위치에 놓아야 함
 - [ ] `enabled: true`인 드론만 실제로 연결을 시도하니, 3대 모두 `true`인지
 
 ## 4. 시뮬레이션 실행

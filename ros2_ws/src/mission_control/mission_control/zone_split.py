@@ -1,58 +1,66 @@
-"""Naive cellular decomposition baseline: equal-width vertical strips.
+"""Naive cellular decomposition: grid cells only, no polygon geometry.
 
-Splits the free-space polygon (boundary minus dead_zones) into N vertical
-strips of equal width and hands each strip to the drone whose home position
-sorts into the same left-to-right order. Strips can come out as MultiPolygon
-if a dead_zone happens to cut one in two -- that's fine, coverage_plan.py
-handles multi-part zones directly.
-
-This is intentionally inefficient (doesn't account for area balance, drone
-travel distance, etc.) -- it exists as a swappable baseline per the project
-plan; a smarter decomposition algorithm will replace this module later.
+Lays a coverage_line_spacing x coverage_line_spacing grid over the mission
+boundary's bounding box, keeps only cells whose center is inside the
+boundary and outside every dead zone, then hands roughly-equal, contiguous
+left-to-right column bands of those cells to each drone -- as close to a
+plain 3-way split as cells allow. Bands are matched to drones by home-
+position x-order. Swappable baseline; a smarter decomposition algorithm
+will replace this module later.
 """
-from shapely.geometry import Polygon, box
+import math
+
+from shapely.geometry import Point, Polygon
 
 
-def build_free_space(boundary_points, dead_zone_point_lists, dead_zone_margin=0.0):
-    """boundary_points: [(x, y), ...] CCW. dead_zone_point_lists: [[(x, y), ...], ...].
+def build_cells(boundary_points, dead_zone_point_lists, cell_size, dead_zone_margin=0.0):
+    """Return every valid cell as a dict: {col, row, x, y} (x, y = cell center).
 
-    dead_zone_margin buffers each dead-zone hole outward before subtracting it,
-    so planned coverage lines keep real clearance from the obstacle instead of
-    potentially grazing its exact boundary (which can happen when the sweep
-    line spacing happens to line up with a dead-zone edge coordinate).
+    A cell counts as valid if its center lands inside the boundary and
+    outside every dead zone -- no attempt to handle cells that straddle an
+    edge more precisely than that. `dead_zone_margin` buffers each dead zone
+    outward first (mitre/sharp-cornered join, not rounded) so cells right at
+    the edge of an obstacle still get excluded with some real clearance.
     """
-    free = Polygon(boundary_points)
-    for dz_points in dead_zone_point_lists:
-        hole = Polygon(dz_points)
-        if dead_zone_margin > 0:
-            # join_style=2 (mitre) keeps corners sharp instead of rounding them off.
-            # coverage_plan.py's hole-splitting cuts strips at this hole's exact
-            # bounding-box x-extent and relies on the hole spanning that whole
-            # strip's width -- a *rounded* buffer tapers to zero width right at
-            # the bbox edges, which left a thin sliver still connecting top and
-            # bottom of the "split" strip (i.e. it silently failed to split).
-            hole = hole.buffer(dead_zone_margin, join_style=2)
-        free = free.difference(hole)
-    return free
+    boundary = Polygon(boundary_points)
+    dead_zones = [Polygon(pts) for pts in dead_zone_point_lists]
+    if dead_zone_margin > 0:
+        dead_zones = [dz.buffer(dead_zone_margin, join_style=2) for dz in dead_zones]
+    minx, miny, maxx, maxy = boundary.bounds
+
+    cells = []
+    row = 0
+    y = miny + cell_size / 2
+    while y < maxy:
+        col = 0
+        x = minx + cell_size / 2
+        while x < maxx:
+            pt = Point(x, y)
+            if boundary.contains(pt) and not any(dz.contains(pt) for dz in dead_zones):
+                cells.append({'col': col, 'row': row, 'x': x, 'y': y})
+            x += cell_size
+            col += 1
+        y += cell_size
+        row += 1
+    return cells
 
 
-def split_into_strips(free_space, num_zones):
-    """Return a list of `num_zones` shapely geometries, ordered left (min x) to right."""
-    minx, miny, maxx, maxy = free_space.bounds
-    width = (maxx - minx) / num_zones
-    strips = []
-    for i in range(num_zones):
-        strip_box = box(minx + i * width, miny - 1.0, minx + (i + 1) * width, maxy + 1.0)
-        strips.append(free_space.intersection(strip_box))
-    return strips
+def assign_cells_to_drones(cells, drones):
+    """drones: list of dicts with 'id' and 'home_position' ([x, y, z]).
 
-
-def assign_zones_to_drones(free_space, drones):
-    """drones: list of dicts with keys 'id' and 'home_position' ([x, y, z]).
-
-    Returns dict drone_id -> shapely geometry, matching strips (left to right)
-    to drones (left to right by home x-coordinate).
+    Splits the set of occupied columns into len(drones) contiguous bands of
+    (nearly) equal column count, left to right, and matches each band to the
+    drone whose home x-coordinate sorts into the same left-to-right order.
+    Returns dict drone_id -> list of cell dicts.
     """
-    strips = split_into_strips(free_space, len(drones))
+    num_zones = len(drones)
+    cols = sorted({c['col'] for c in cells})
+    band_size = math.ceil(len(cols) / num_zones) if cols else 1
+    col_band = {col: min(i // band_size, num_zones - 1) for i, col in enumerate(cols)}
+
+    bands = [[] for _ in range(num_zones)]
+    for cell in cells:
+        bands[col_band[cell['col']]].append(cell)
+
     drones_by_x = sorted(drones, key=lambda d: d['home_position'][0])
-    return {d['id']: strip for d, strip in zip(drones_by_x, strips)}
+    return {d['id']: band for d, band in zip(drones_by_x, bands)}

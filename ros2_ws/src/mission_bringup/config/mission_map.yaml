@@ -10,9 +10,14 @@ marker_size: 0.14
 
 boundary: [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]]
 
+# Kept in a corner on purpose: coverage_plan.py's ㄹ-shape sweep has no
+# hole-avoidance logic at all -- it just skips a cell if it's not in the
+# assigned cell list. A dead zone in the middle of a zone would cut a gap out
+# of the *middle* of some row, which the naive sweep would jump straight
+# across; tucked into a corner it only ever trims the end of a row instead.
 dead_zones:
   - name: "obstacle_1"
-    points: [[4.0, 2.0], [5.0, 2.0], [5.0, 3.0], [4.0, 3.0]]
+    points: [[8.0, 5.0], [10.0, 5.0], [10.0, 6.0], [8.0, 6.0]]
 
 drones:
   - id: "cf1"

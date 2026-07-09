@@ -150,7 +150,7 @@ flowchart TD
 | `MarkerRecord`        | `int32 marker_id`, `geometry_msgs/Point position`                                     | (배열로 래핑)             | -                                      |
 | `MarkerRecordArray`   | `MarkerRecord[] markers`                                                              | `/mission/markers`        | Reliable, **Transient Local**(latched) |
 
-`ZoneAssignment.polygons`가 배열인 이유: dead-zone에 의해 한 드론의 zone이 여러 조각(MultiPolygon)으로 갈라질 수 있기 때문이다. 표준 메시지도 그대로 재사용한다 — `sensor_msgs/Image`(`/cfN/image_raw`), `std_msgs/String`(`/mission/state`), `std_srvs/Trigger`(`/mission/start`).
+`ZoneAssignment.polygons`가 배열인 이유: zone은 폴리곤이 아니라 grid cell들의 집합이라, 셀 하나당 작은 사각형 폴리곤 하나씩 담아 배열로 보낸다(`control_node`의 `_publish_plan()` 참고) — 그래서 GCS 바닥에는 하나로 이어진 색칠 영역이 아니라 "칠해진 셀들의 모자이크"가 보인다. 표준 메시지도 그대로 재사용한다 — `sensor_msgs/Image`(`/cfN/image_raw`), `std_msgs/String`(`/mission/state`), `std_srvs/Trigger`(`/mission/start`).
 
 ## 4. 상태 머신
 
@@ -229,12 +229,10 @@ stateDiagram-v2
   - 주요 파라미터: `mission_map_path`(필수), `cruise_speed`(기본 0.3 m/s), `min_leg_duration`(1.5s), `leg_settle_margin`(0.5s), `takeoff_duration`(2.0s), `takeoff_settle_time`(2.5s), `land_duration`(2.5s), `land_settle_time`(3.0s), `start_immediately`(false — GCS 버튼 없이 즉시 시작하고 싶을 때 true), `dead_zone_margin`(0.15m — 아래 `zone_split.py` 설명 참고).
   - **구간(leg) 소요시간 계산은 실측 위치 기반**: 다음 waypoint까지의 `go_to` `duration`(=거리/`cruise_speed`, 최소 `min_leg_duration`)을 계산할 때 "마지막으로 보낸 목표에 이미 도착했다"고 가정하지 않고, `/states`를 구독해 실제 측정 위치(`live_xy`)에서부터의 거리로 계산한다. sim/real 타이밍이 우리 wall-clock 가정과 어긋나 실제 위치가 뒤처져 있는데도 그 사실을 모른 채 다음 구간을 계산하면, 남은 실제 거리에 비해 `duration`이 지나치게 짧게 잡혀 crazyswarm2의 `go_to`가 불가능한 가속도를 요구하며 불안정해질 수 있다(공식 문서에도 명시된 위험) — 이를 피하기 위한 장치.
   - **`/mission/progress`는 "명령을 보낸" 인덱스가 아니라 "실제로 도착한" 인덱스**: `DroneHandle`이 `arrived_index`(방금 도착 완료한 waypoint)와 `pending_index`(현재 비행 중인 목표)를 분리해서 들고 있다가, 한 구간의 `leg_deadline`이 지나서 다음 구간을 보낼 때 비로소 `pending_index`를 `arrived_index`로 승격시키고 그 값을 발행한다. 예전엔 명령을 보낸 즉시 그 인덱스를 발행해서 GCS의 "방문한 경로"가 실제로 드론이 도착하기도 전에 미리 칠해지는 문제가 있었다.
-- **`zone_split.py`**: `build_free_space()`가 `boundary`+`dead_zones`로 free-space 폴리곤을 만드는데, 이때 `dead_zone_margin`만큼 각 dead-zone을 부풀린 뒤 빼서(`difference`) 커버리지 경로가 dead-zone 경계에 완전히 붙어버리는 일(스윕 라인 간격이 우연히 dead-zone 좌표와 일치하는 경우 생길 수 있음)을 막는다. `assign_zones_to_drones()`가 x축 기준 등폭 세로 스트립으로 나눈 뒤 드론 홈 위치의 x좌표 순서와 매칭한다. Dead-zone에 걸리면 zone이 `MultiPolygon`이 될 수 있으며 그대로 허용한다.
-- **`coverage_plan.py`**: 임무 단위는 **`coverage_line_spacing` x `coverage_line_spacing` grid cell**이고, waypoint는 그 셀의 **중심점**이다 — zone 경계선을 따라가는 게 아니라 zone에 속하는 모든 셀의 중심을 lawnmower(가로줄 왕복) 순서로 방문한다. 셀 그리드는 zone의 bounding box 원점에 정렬해서, 여러 조각으로 나뉜 zone도 셀 경계가 서로 어긋나지 않는다(`_sweep_cells()`).
-  - **경로는 항상 드론의 홈(스폰) 위치에서 시작**한다(`plan_coverage()`가 `start_xy`를 첫 waypoint로 그대로 넣음) — 이륙은 제자리에서 수직 상승이라 이륙 직후 드론은 이미 홈 위치 상공에 떠 있으므로, 홈에서 가장 가까운 셀로 굳이 먼저 이동할 필요 없이 커버리지 스윕을 바로 시작한다.
-  - dead-zone이 있는 zone은 먼저 `_split_out_holes()`가 (zone_split.py와 같은 세로-스트립 방식으로) hole 없는 조각 여러 개로 **한 번에** 잘라낸다 — 초기 버전은 dead-zone에 걸리는 매 스캔라인마다 그 자리에서 우회를 계산했는데, dead-zone 높이만큼 여러 줄이 걸리면 그 줄들 각각이 zone 맨 위/아래까지 왕복하는 거대한 우회를 반복해서 "위로 한참 올라갔다 뚝 떨어지는" 비행이 나왔다. 조각을 한 번만 잘라두면 각 조각은 그냥 단순 lawnmower로 셀 중심을 스윕하면 되고 줄 단위 특수 처리가 필요 없다.
-  - `plan_coverage()`는 이 조각들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤 각 조각을 스윕하는데, 조각 사이 이동 구간이 (같은 dead-zone을 사이에 둔 "위쪽 조각"→"아래쪽 조각"처럼) 직선으로 가로지르게 되는 경우엔 zone 바깥 경계(상/하/좌/우, dead-zone은 항상 내부에만 있으므로 경계는 항상 안전) 중 가장 짧게 검증되는 우회로 대체한다(`_safe_transit()`).
-- 두 모듈 모두 rclpy에 의존하지 않는 순수 함수라 독립적으로 단위 테스트 가능하다 (예제 지도로 free-space 면적==zone 면적 합, 모든 waypoint가 자기 zone 내부에 있음을 확인 완료).
+- **`zone_split.py`**: 폴리곤 기하 연산이 아니라 **순수 grid-cell 배열**로 나눈다. `build_cells()`가 `coverage_line_spacing` 간격 grid를 boundary 전체에 깔고, 각 셀 중심이 boundary 안 + 모든 dead-zone 밖(`dead_zone_margin`만큼 부풀린 뒤 체크)인 셀만 남긴다. `assign_cells_to_drones()`는 이 valid 셀들이 차지하는 **컬럼(x 인덱스)** 을 드론 수만큼 균등하게 연속된 밴드로 나누고(가장 3등분에 가깝게), 왼쪽부터 드론 홈 x좌표 순서와 매칭한다 — Shapely로 폴리곤을 자르던 예전 방식을 완전히 걷어내고, 정말로 좌표 배열을 등분하는 것뿐이다.
+- **`coverage_plan.py`**: waypoint는 셀의 **중심점**이고, 방문 순서는 **ㄹ자(boustrophedon)** 그 자체다 — 할당된 셀들을 row별로 묶어서 정렬한 뒤, 한 줄은 왼→오, 다음 줄은 오→왼으로 번갈아 이어붙인다. dead-zone 등으로 셀이 빠지면 그냥 건너뛴다 — 구멍을 감지해서 돌아가는 로직이 전혀 없다(그래서 `mission_map.yaml`의 예제 dead-zone을 지도 한쪽 구석에 배치해뒀다: 중간에 있으면 한 줄의 중간이 뻥 뚫려 그 줄을 가로지르게 되지만, 구석에 있으면 줄 끝부분만 짧아질 뿐이다).
+  - **경로는 항상 드론의 홈(스폰) 위치에서 시작**한다(`plan_coverage()`가 `start_xy`를 첫 waypoint로 그대로 넣음) — 이륙은 제자리에서 수직 상승이라 이륙 직후 드론은 이미 홈 위치 상공에 떠 있으므로, 바로 스윕을 시작한다. 첫 줄을 홈에서 위/아래 어느 쪽이든 더 가까운 끝에서 시작하도록만 골라서, 존 반대편 끝에서부터 시작해 불필요하게 긴 첫 구간이 생기지 않게 한다.
+- 두 모듈 모두 rclpy에 의존하지 않는 순수 함수(그리고 shapely는 셀의 boundary/dead-zone 소속 여부를 확인하는 `Point.contains()` 정도로만 쓴다)라 독립적으로 단위 테스트 가능하다.
 
 ## 7. `cf_perception` 패키지 상세
 
@@ -274,7 +272,7 @@ stateDiagram-v2
   - **커버리지 경로/방문 기록은 항상 바닥(z≈0)에 투영해서 그림** — 실제 비행은 `uav_cruise_altitude` 고도에서 하지만, 바닥 그림이 "어느 셀을 계획/방문했는지" 한눈에 보이는 지도 역할을 하도록 함. 계획 경로는 점선, **방문한 구간은 두꺼운 튜브 메시**로 표시(`/mission/progress`로 받은 `waypoint_index`까지를 그대로 그림 — 클라이언트가 위치로 추측하지 않음. three.js `LineBasicMaterial`의 `linewidth`는 대부분의 브라우저/GPU에서 무시되는 문제가 있어 `TubeGeometry`로 그림). 실제 고도에서 나는 드론과 바닥 그림을 시각적으로 이어주기 위해, 드론 바로 아래 바닥 점과 드론 사이를 점선으로 연결(tether)한다.
   - **마커 표시**: (sim only) 아직 못 찾은 ground-truth 마커는 회색 원 테두리+흐린 ID 라벨로 위치만 표시, `/detections`로 실제 검출되면 그 자리의 회색 표시가 사라지고 밝은 노란 구+ID 라벨로 바뀐다 — "찾기 전/후"가 시각적으로 뚜렷이 구분됨.
   - 상단 HUD: 현재 미션 phase 텍스트(`/mission/state` 그대로 표시) + Start 버튼(미션 시작 후 자동 비활성화, 버튼 텍스트가 현재 phase로 바뀜).
-  - 우측 하단 패널: 발견한 마커 개수(`found/total`, 실기체처럼 total을 모르면 `found`만) + 발견한 마커 ID 목록.
+  - 우측 하단 패널: 발견한 마커 개수(`found/total`, 실기체처럼 total을 모르면 `found`만) + 발견한 마커 목록(`#id (x, y)` 좌표 포함).
 
 ## 9. 런치 파일 구조
 
@@ -283,12 +281,14 @@ stateDiagram-v2
 |                                               | `sim.launch.py`                                 | `real.launch.py`                                                                                                    |
 | --------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | crazyswarm2 `crazyflie/launch/launch.py` 포함 | `backend:=sim`                                  | `backend:=cflib`                                                                                                    |
-| `crazyflies_yaml_file`                        | `mission_bringup/config/crazyflies.yaml` (동일) | 동일                                                                                                                |
+| `crazyflies_yaml_file`                        | 실행 시점에 생성되는 임시 파일 (아래 참고)      | 동일 방식                                                                                                            |
 | `mocap`                                       | `False`                                         | `False` (모션캡처 없이 온보드 추정치 사용 — 실제 하드웨어에서는 시간이 지나면 위치 드리프트 발생 가능, 알려진 한계) |
 | perception 노드                               | `cf_perception/sim_perception_node`             | `cf_perception/real_perception_node`                                                                                |
 | perception 파라미터                           | `mission_map_path`, `true_markers_path`         | `wifi_ips`(placeholder, 실제 IP로 교체 필요), `camera_intrinsics_path`                                              |
 | `mission_control/control_node`                | 동일 (`mission_map_path`)                       | 동일                                                                                                                |
 | `gcs_dashboard/gcs_node`                      | 동일 (`mission_map_path`, `port=5000`)          | 동일                                                                                                                |
+
+**`crazyflies_yaml_file`은 매 실행마다 자동 생성된다**: 두 런치 파일 모두 `OpaqueFunction`으로 실행 시점에 `mission_map.yaml`을 읽어서, 각 드론의 `home_position`을 `mission_bringup/config/crazyflies.yaml`(템플릿)의 해당 `robots.<id>.initial_position`에 덮어쓴 뒤 임시 파일로 저장하고, 그 경로를 crazyswarm2 launch에 넘긴다(`_generate_crazyflies_yaml()`). 이러면 "드론이 어디서 출발하는지"의 유일한 기준점이 `mission_map.yaml` 하나가 되어, 두 설정 파일을 손으로 맞춰야 할 필요가 없다 — 드론의 경로는 항상 `home_position`에서 시작하는데(6절 `coverage_plan.py` 참고), 이륙이 제자리 수직 상승뿐이라 스폰 위치와 경로 시작점이 어긋나면 이륙 직후 바로 옆으로 이동해야 하기 때문이다. 실기체에서는 이 자동 생성이 `initial_position` 값만 맞춰줄 뿐, **물리적으로 드론을 그 위치에 놓는 것은 여전히 사람이 해야 한다**(`real.launch.py` 상단 주석 참고).
 
 실행 예시(ROS 2/colcon 환경에서):
 

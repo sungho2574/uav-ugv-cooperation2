@@ -13,25 +13,49 @@ source -- that is a real limitation of this baseline, not something solved
 here. Also NOTE: wifi_ips below are placeholders -- set them to each AI-deck's
 actual WiFi AP IP address, and calibrate cf_perception/config/camera_intrinsics.yaml
 before trusting marker detections.
+
+IMPORTANT: `initial_position` is auto-generated from mission_map.yaml's
+home_position for each drone (see _generate_crazyflies_yaml below), but on
+real hardware YOU still have to physically place each Crazyflie at that exact
+spot before launch -- unlike sim, nothing here moves the physical drone there.
 """
 import os
+import tempfile
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
+def _generate_crazyflies_yaml(mission_map, base_crazyflies_path):
+    """Same injection as sim.launch.py -- see there for why."""
+    with open(base_crazyflies_path, 'r') as f:
+        crazyflies_cfg = yaml.safe_load(f)
+    for d in mission_map['drones']:
+        if d['id'] in crazyflies_cfg.get('robots', {}):
+            crazyflies_cfg['robots'][d['id']]['initial_position'] = list(d['home_position'])
+
+    fd, generated_path = tempfile.mkstemp(prefix='crazyflies_generated_', suffix='.yaml')
+    with os.fdopen(fd, 'w') as f:
+        yaml.safe_dump(crazyflies_cfg, f)
+    return generated_path
+
+
+def _build(context, *args, **kwargs):
     bringup_share = get_package_share_directory('mission_bringup')
     perception_share = get_package_share_directory('cf_perception')
     mission_map_path = os.path.join(bringup_share, 'config', 'mission_map.yaml')
-    crazyflies_yaml_path = os.path.join(bringup_share, 'config', 'crazyflies.yaml')
+    base_crazyflies_path = os.path.join(bringup_share, 'config', 'crazyflies.yaml')
     camera_intrinsics_path = os.path.join(
         perception_share, 'config', 'camera_intrinsics.yaml')
 
-    drone_ids = ['cf1', 'cf2', 'cf3']
+    with open(mission_map_path, 'r') as f:
+        mission_map = yaml.safe_load(f)
+    generated_crazyflies_path = _generate_crazyflies_yaml(mission_map, base_crazyflies_path)
+    drone_ids = [d['id'] for d in mission_map['drones']]
     # TODO: replace with each AI-deck's actual WiFi AP IP address.
     wifi_ips = ['192.168.4.1', '192.168.4.2', '192.168.4.3']
 
@@ -40,7 +64,7 @@ def generate_launch_description():
             get_package_share_directory('crazyflie'), 'launch', 'launch.py')),
         launch_arguments={
             'backend': 'cflib',
-            'crazyflies_yaml_file': crazyflies_yaml_path,
+            'crazyflies_yaml_file': generated_crazyflies_path,
             'mocap': 'False',
             'gui': 'False',
             'teleop': 'False',
@@ -85,9 +109,8 @@ def generate_launch_description():
         }],
     )
 
-    return LaunchDescription([
-        crazyswarm2_launch,
-        control_node,
-        perception_node,
-        gcs_node,
-    ])
+    return [crazyswarm2_launch, control_node, perception_node, gcs_node]
+
+
+def generate_launch_description():
+    return LaunchDescription([OpaqueFunction(function=_build)])

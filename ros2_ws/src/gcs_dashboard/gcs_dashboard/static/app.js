@@ -99,7 +99,7 @@ class GcsScene {
     while (this.mapGroup.children.length) this.mapGroup.remove(this.mapGroup.children[0]);
     const boundary = mapInfo.boundary || [];
     if (boundary.length >= 3) {
-      this.mapGroup.add(lineLoopFromPoints(boundary, 0x44cc44, 0.01));
+      this.mapGroup.add(lineLoopFromPoints(boundary, 0x44cc44, 0.006));
       const shape = polygonShape(boundary);
       const geom = new THREE.ShapeGeometry(shape);
       geom.rotateX(Math.PI / 2);
@@ -119,10 +119,10 @@ class GcsScene {
       const gridMat = new THREE.LineBasicMaterial({ color: 0x384049 });
       const gridPts = [];
       for (let x = minx; x <= maxx + 1e-6; x += cell) {
-        gridPts.push(w2t(x, miny, 0.003), w2t(x, maxy, 0.003));
+        gridPts.push(w2t(x, miny, 0.002), w2t(x, maxy, 0.002));
       }
       for (let y = miny; y <= maxy + 1e-6; y += cell) {
-        gridPts.push(w2t(minx, y, 0.003), w2t(maxx, y, 0.003));
+        gridPts.push(w2t(minx, y, 0.002), w2t(maxx, y, 0.002));
       }
       const gridGeom = new THREE.BufferGeometry().setFromPoints(gridPts);
       this.mapGroup.add(new THREE.LineSegments(gridGeom, gridMat));
@@ -134,11 +134,11 @@ class GcsScene {
     }
     (mapInfo.dead_zones || []).forEach((pts) => {
       if (pts.length < 3) return;
-      this.mapGroup.add(lineLoopFromPoints(pts, 0xcc4444, 0.02));
+      this.mapGroup.add(lineLoopFromPoints(pts, 0xcc4444, 0.009));
       const shape = polygonShape(pts);
       const geom = new THREE.ShapeGeometry(shape);
       geom.rotateX(Math.PI / 2);
-      geom.translate(0, 0.015, 0);
+      geom.translate(0, 0.008, 0);
       const mesh = new THREE.Mesh(
         geom, new THREE.MeshBasicMaterial({
           color: 0xcc4444, transparent: true, opacity: 0.35, side: THREE.DoubleSide }));
@@ -146,6 +146,12 @@ class GcsScene {
     });
   }
 
+  // Ground-layer stacking order (low to high y-lift, i.e. bottom to top from
+  // the top-down camera's point of view): ground(0) < grid(0.002) < zone
+  // fill(0.004) < boundary outline(0.006) < dead-zone(0.008-0.009) < marker
+  // placeholder(0.012) < planned/visited path(0.02, see setPaths). Path used
+  // to sit *below* the zone fill, which visually washed it out -- it needs to
+  // be the topmost flat layer since it's the thing you actually want to read.
   setZones(zones) {
     while (this.zoneGroup.children.length) this.zoneGroup.remove(this.zoneGroup.children[0]);
     zones.forEach((zone) => {
@@ -155,7 +161,7 @@ class GcsScene {
         const shape = polygonShape(pts);
         const geom = new THREE.ShapeGeometry(shape);
         geom.rotateX(Math.PI / 2);
-        geom.translate(0, 0.008, 0);
+        geom.translate(0, 0.004, 0);
         const mesh = new THREE.Mesh(
           geom, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.16, side: THREE.DoubleSide }));
         this.zoneGroup.add(mesh);
@@ -183,13 +189,15 @@ class GcsScene {
       const color = new THREE.Color(FALLBACK_COLORS[droneId] || '#cccccc');
       const visitedUpTo = (progress[droneId] && progress[droneId].waypoint_index) || 0;
 
-      const full = wps.map(([x, y]) => w2t(x, y, 0.004));
+      // Topmost flat layer (see setZones) so it's never washed out under the
+      // zone-fill tint, plus higher opacity for contrast against the ground.
+      const full = wps.map(([x, y]) => w2t(x, y, 0.02));
       const plannedGeom = new THREE.BufferGeometry().setFromPoints(full);
       this.pathGroup.add(new THREE.Line(
-        plannedGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.15, gapSize: 0.1, opacity: 0.5, transparent: true })).computeLineDistances());
+        plannedGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.15, gapSize: 0.1, opacity: 0.9, transparent: true })).computeLineDistances());
 
       const visitedPts = wps.slice(0, Math.min(wps.length, visitedUpTo + 1))
-        .map(([x, y]) => w2t(x, y, 0.004));
+        .map(([x, y]) => w2t(x, y, 0.02));
       // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
       // zero-length segment (NaN tangents) which would make the tube vanish.
       const dedup = [];
@@ -219,7 +227,7 @@ class GcsScene {
     }
     this.placeholderMeshes = {};
     allMarkers.forEach((m) => {
-      const circle = lineLoopFromPoints(circlePoints(m.x, m.y, 0.14), 0x888888, 0.006);
+      const circle = lineLoopFromPoints(circlePoints(m.x, m.y, 0.14), 0x888888, 0.012);
       const label = makeTextSprite('#' + m.id, '#888888');
       label.position.copy(w2t(m.x, m.y, (m.z || 0) + 0.25));
       this.markerPlaceholderGroup.add(circle);
@@ -289,7 +297,7 @@ class GcsScene {
       if (this.tethers[d.id]) this.tetherGroup.remove(this.tethers[d.id]);
       const color = new THREE.Color(zoneColors[d.id] || FALLBACK_COLORS[d.id] || '#ffffff');
       const tetherGeom = new THREE.BufferGeometry().setFromPoints(
-        [w2t(d.x, d.y, 0.004), w2t(d.x, d.y, d.z)]);
+        [w2t(d.x, d.y, 0.02), w2t(d.x, d.y, d.z)]);
       const tether = new THREE.Line(
         tetherGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.08, gapSize: 0.06 }));
       tether.computeLineDistances();
@@ -407,11 +415,12 @@ function main() {
         const found = (state.markers || []).slice().sort((a, b) => a.id - b.id);
         const countText = totalMarkerCount != null
           ? `${found.length}/${totalMarkerCount}` : `${found.length}`;
-        const idList = found.length
-          ? found.map((m) => '#' + m.id).join(', ') : '(없음)';
+        const rows = found.length
+          ? found.map((m) => `<div>#${m.id} (${m.x.toFixed(2)}, ${m.y.toFixed(2)})</div>`).join('')
+          : '<div>(없음)</div>';
         markerStatusEl.innerHTML =
           `<div class="marker-count">발견한 마커: ${countText}</div>` +
-          `<div class="marker-ids">${idList}</div>`;
+          `<div class="marker-ids">${rows}</div>`;
       });
     }).catch((err) => {
       console.error('gcs /api/state poll failed:', err);

@@ -71,7 +71,15 @@ class DroneHandle:
         self.go_to_client = node.create_client(GoTo, prefix + '/go_to')
 
         self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
-        self.wp_index = 0
+        # arrived_index: last waypoint the drone has actually finished flying to
+        # (index 0 == home, true immediately -- see plan_coverage). pending_index:
+        # index it's currently *in flight toward*, becomes arrived_index only once
+        # that leg's deadline passes. Published progress must reflect arrived_index,
+        # not "index we just sent a command for" -- otherwise the GCS paints a
+        # waypoint as visited the instant it's commanded, before the drone has
+        # actually gotten anywhere near it.
+        self.arrived_index = 0
+        self.pending_index = 0
         self.done = False
         self.last_target_xy = (home_position[0], home_position[1])
 
@@ -263,8 +271,9 @@ class ControlNode(Node):
             zone_geom = self.zone_geoms[drone_id]
             start_xy = (handle.home_position[0], handle.home_position[1])
             handle.waypoints = plan_coverage(zone_geom, self.coverage_line_spacing, start_xy)
-            handle.wp_index = 0
-            handle.done = len(handle.waypoints) == 0
+            handle.arrived_index = 0
+            handle.pending_index = 0
+            handle.done = len(handle.waypoints) <= 1  # index 0 is home itself, nothing to fly
 
     def _publish_plan(self):
         zone_array = ZoneAssignmentArray()
@@ -315,27 +324,42 @@ class ControlNode(Node):
 
     def _init_covering(self):
         for handle in self.drones.values():
-            handle.wp_index = 0
-            handle.done = len(handle.waypoints) == 0
+            handle.arrived_index = 0
+            handle.pending_index = 0
+            handle.done = len(handle.waypoints) <= 1
             handle.last_target_xy = (handle.home_position[0], handle.home_position[1])
         self._send_next_leg_for_all(time.monotonic())
 
     def _send_next_leg_for_all(self, now):
+        """Advance every still-active drone by one waypoint.
+
+        Only called once the *previous* leg's deadline has passed (from
+        _step_covering, or once at covering start from _init_covering), so
+        `pending_index` -- the target we sent last time -- can now be trusted
+        as actually reached: promote it to `arrived_index` before picking the
+        next target. Publishing progress using `arrived_index` (rather than
+        "whichever index we just commanded") is what makes the GCS's visited-
+        path fill in as the drone actually gets there, instead of the instant
+        the command is sent.
+        """
         max_duration = 0.0
         any_active = False
         for handle in self.drones.values():
             if handle.done:
                 continue
-            if handle.wp_index >= len(handle.waypoints):
+            handle.arrived_index = handle.pending_index
+            next_idx = handle.arrived_index + 1
+            if next_idx >= len(handle.waypoints):
                 handle.done = True
                 continue
-            target_xy = handle.waypoints[handle.wp_index]
-            handle.wp_index += 1
+            target_xy = handle.waypoints[next_idx]
             current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
             leg_dist = dist2d(current_xy, target_xy)
             duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
             handle.send_go_to(
                 (target_xy[0], target_xy[1], self.cruise_altitude), 0.0, duration)
+            handle.last_target_xy = target_xy
+            handle.pending_index = next_idx
             max_duration = max(max_duration, duration)
             any_active = True
 
@@ -352,7 +376,7 @@ class ControlNode(Node):
         for handle in self.drones.values():
             array.progress.append(DroneProgress(
                 drone_id=handle.drone_id,
-                waypoint_index=handle.wp_index,
+                waypoint_index=handle.arrived_index,
                 total_waypoints=len(handle.waypoints),
             ))
         self.progress_pub.publish(array)

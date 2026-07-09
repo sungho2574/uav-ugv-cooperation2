@@ -154,19 +154,25 @@ def _safe_transit(zone_geom, p1, p2):
 
 def plan_coverage(zone_geom, line_spacing, start_xy):
     """zone_geom: shapely Polygon/MultiPolygon. Returns ordered [(x, y), ...] cell-center
-    waypoints, one per line_spacing x line_spacing cell inside the zone."""
+    waypoints, one per line_spacing x line_spacing cell inside the zone.
+
+    The path always starts at `start_xy` itself (the drone's home/spawn point),
+    not at whichever cell center happens to be nearest to it -- home is where
+    the drone already is right after takeoff (straight up, same x/y), so the
+    first leg of the sweep should be zero-distance rather than an extra
+    unplanned commute out to the first cell.
+    """
     if zone_geom.is_empty:
         return []
     grid_origin = (zone_geom.bounds[0], zone_geom.bounds[1])  # shared by every piece
 
-    waypoints = []
-    last_point = None
+    waypoints = [start_xy]
+    last_point = start_xy
     for poly in _ordered_subpolygons(zone_geom, start_xy):
         piece_wps = _sweep_cells(poly, line_spacing, grid_origin)
         if not piece_wps:
             continue
-        if last_point is not None:
-            waypoints.extend(_safe_transit(zone_geom, last_point, piece_wps[0]))
+        waypoints.extend(_safe_transit(zone_geom, last_point, piece_wps[0]))
         waypoints.extend(piece_wps)
         last_point = piece_wps[-1]
     return waypoints

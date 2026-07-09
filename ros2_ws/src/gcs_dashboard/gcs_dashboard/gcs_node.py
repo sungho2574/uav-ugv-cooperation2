@@ -131,12 +131,13 @@ class GcsNode(Node):
         republish static map geometry over a topic."""
         if not path:
             self.get_logger().warn('mission_map_path not set, boundary/dead_zones will not render')
-            return {'boundary': [], 'dead_zones': []}
+            return {'boundary': [], 'dead_zones': [], 'coverage_line_spacing': 0.5}
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
         return {
             'boundary': data.get('boundary', []),
             'dead_zones': [dz.get('points', []) for dz in data.get('dead_zones', [])],
+            'coverage_line_spacing': data.get('coverage_line_spacing', 0.5),
         }
 
     def _load_all_markers(self, path):

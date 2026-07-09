@@ -228,8 +228,10 @@ stateDiagram-v2
 - **`control_node.py`**: 4절에서 설명한 FSM 전체. crazyswarm2의 액션 서버가 존재하지 않는다는 점(전부 fire-and-forget 서비스)을 고려해, `crazyflie_py`의 `Crazyswarm` 래퍼를 쓰지 않고 `/cfN/takeoff`,`/cfN/land`,`/cfN/go_to` 서비스 클라이언트를 직접 만들어 쓴다. 블로킹 sleep이 전혀 없는 10Hz 타이머 기반 논블로킹 FSM이라 `/detections` 구독을 비행 중에도 계속 처리한다.
   - 주요 파라미터: `mission_map_path`(필수), `cruise_speed`(기본 0.3 m/s), `min_leg_duration`(1.5s), `leg_settle_margin`(0.5s), `takeoff_duration`(2.0s), `takeoff_settle_time`(2.5s), `land_duration`(2.5s), `land_settle_time`(3.0s), `start_immediately`(false — GCS 버튼 없이 즉시 시작하고 싶을 때 true), `dead_zone_margin`(0.15m — 아래 `zone_split.py` 설명 참고).
   - **구간(leg) 소요시간 계산은 실측 위치 기반**: 다음 waypoint까지의 `go_to` `duration`(=거리/`cruise_speed`, 최소 `min_leg_duration`)을 계산할 때 "마지막으로 보낸 목표에 이미 도착했다"고 가정하지 않고, `/states`를 구독해 실제 측정 위치(`live_xy`)에서부터의 거리로 계산한다. sim/real 타이밍이 우리 wall-clock 가정과 어긋나 실제 위치가 뒤처져 있는데도 그 사실을 모른 채 다음 구간을 계산하면, 남은 실제 거리에 비해 `duration`이 지나치게 짧게 잡혀 crazyswarm2의 `go_to`가 불가능한 가속도를 요구하며 불안정해질 수 있다(공식 문서에도 명시된 위험) — 이를 피하기 위한 장치.
+  - **`/mission/progress`는 "명령을 보낸" 인덱스가 아니라 "실제로 도착한" 인덱스**: `DroneHandle`이 `arrived_index`(방금 도착 완료한 waypoint)와 `pending_index`(현재 비행 중인 목표)를 분리해서 들고 있다가, 한 구간의 `leg_deadline`이 지나서 다음 구간을 보낼 때 비로소 `pending_index`를 `arrived_index`로 승격시키고 그 값을 발행한다. 예전엔 명령을 보낸 즉시 그 인덱스를 발행해서 GCS의 "방문한 경로"가 실제로 드론이 도착하기도 전에 미리 칠해지는 문제가 있었다.
 - **`zone_split.py`**: `build_free_space()`가 `boundary`+`dead_zones`로 free-space 폴리곤을 만드는데, 이때 `dead_zone_margin`만큼 각 dead-zone을 부풀린 뒤 빼서(`difference`) 커버리지 경로가 dead-zone 경계에 완전히 붙어버리는 일(스윕 라인 간격이 우연히 dead-zone 좌표와 일치하는 경우 생길 수 있음)을 막는다. `assign_zones_to_drones()`가 x축 기준 등폭 세로 스트립으로 나눈 뒤 드론 홈 위치의 x좌표 순서와 매칭한다. Dead-zone에 걸리면 zone이 `MultiPolygon`이 될 수 있으며 그대로 허용한다.
 - **`coverage_plan.py`**: 임무 단위는 **`coverage_line_spacing` x `coverage_line_spacing` grid cell**이고, waypoint는 그 셀의 **중심점**이다 — zone 경계선을 따라가는 게 아니라 zone에 속하는 모든 셀의 중심을 lawnmower(가로줄 왕복) 순서로 방문한다. 셀 그리드는 zone의 bounding box 원점에 정렬해서, 여러 조각으로 나뉜 zone도 셀 경계가 서로 어긋나지 않는다(`_sweep_cells()`).
+  - **경로는 항상 드론의 홈(스폰) 위치에서 시작**한다(`plan_coverage()`가 `start_xy`를 첫 waypoint로 그대로 넣음) — 이륙은 제자리에서 수직 상승이라 이륙 직후 드론은 이미 홈 위치 상공에 떠 있으므로, 홈에서 가장 가까운 셀로 굳이 먼저 이동할 필요 없이 커버리지 스윕을 바로 시작한다.
   - dead-zone이 있는 zone은 먼저 `_split_out_holes()`가 (zone_split.py와 같은 세로-스트립 방식으로) hole 없는 조각 여러 개로 **한 번에** 잘라낸다 — 초기 버전은 dead-zone에 걸리는 매 스캔라인마다 그 자리에서 우회를 계산했는데, dead-zone 높이만큼 여러 줄이 걸리면 그 줄들 각각이 zone 맨 위/아래까지 왕복하는 거대한 우회를 반복해서 "위로 한참 올라갔다 뚝 떨어지는" 비행이 나왔다. 조각을 한 번만 잘라두면 각 조각은 그냥 단순 lawnmower로 셀 중심을 스윕하면 되고 줄 단위 특수 처리가 필요 없다.
   - `plan_coverage()`는 이 조각들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤 각 조각을 스윕하는데, 조각 사이 이동 구간이 (같은 dead-zone을 사이에 둔 "위쪽 조각"→"아래쪽 조각"처럼) 직선으로 가로지르게 되는 경우엔 zone 바깥 경계(상/하/좌/우, dead-zone은 항상 내부에만 있으므로 경계는 항상 안전) 중 가장 짧게 검증되는 우회로 대체한다(`_safe_transit()`).
 - 두 모듈 모두 rclpy에 의존하지 않는 순수 함수라 독립적으로 단위 테스트 가능하다 (예제 지도로 free-space 면적==zone 면적 합, 모든 waypoint가 자기 zone 내부에 있음을 확인 완료).
@@ -238,8 +240,9 @@ stateDiagram-v2
 
 - 빌드 타입: `ament_python`. sim/real 두 실행 파일이 **동일한 토픽 계약**(`/states`, `/detections`)을 지켜서, `control_node`/`gcs_dashboard`는 어느 쪽이 떠 있는지 몰라도 된다.
 - **`sim_perception_node.py`**:
-  - 파라미터: `drone_ids`(기본 `[cf1,cf2,cf3]`), `mission_map_path`(필수, `grid_resolution`만 참조), `true_markers_path`(필수), `world_frame`(기본 `world`, `crazyflies.yaml`의 `reference_frame`과 일치해야 함), `poll_rate_hz`(기본 10Hz).
-  - **주의**: crazyswarm2의 **sim 백엔드**(`crazyflie_sim/crazyflie_server.py`)는 `/cfN/pose`를 아예 발행하지 않는다 — 기본 활성화된 `rviz` visualization 플러그인이 `/tf`에 `world → cfN` 변환만 방송한다(real/cflib 백엔드는 반대로 `/cfN/pose`를 정상 발행함). 그래서 이 노드는 `/cfN/pose`를 구독하는 대신 **tf2로 `world→cfN` 변환을 폴링**해서 위치를 얻는다. 매 폴링마다 `/states`를 재발행하고, 미검출 ground-truth 마커까지의 평면거리를 계산해 `grid_resolution/2` 이내면 `/detections` 발행(마커별 1회만).
+  - 파라미터: `drone_ids`(기본 `[cf1,cf2,cf3]`), `mission_map_path`(필수, `coverage_line_spacing` 참조), `true_markers_path`(필수), `world_frame`(기본 `world`, `crazyflies.yaml`의 `reference_frame`과 일치해야 함), `poll_rate_hz`(기본 10Hz).
+  - **주의**: crazyswarm2의 **sim 백엔드**(`crazyflie_sim/crazyflie_server.py`)는 `/cfN/pose`를 아예 발행하지 않는다 — 기본 활성화된 `rviz` visualization 플러그인이 `/tf`에 `world → cfN` 변환만 방송한다(real/cflib 백엔드는 반대로 `/cfN/pose`를 정상 발행함). 그래서 이 노드는 `/cfN/pose`를 구독하는 대신 **tf2로 `world→cfN` 변환을 폴링**해서 위치를 얻는다. 매 폴링마다 `/states`를 재발행하고, 미검출 ground-truth 마커까지의 평면거리를 계산해 검출 반경 이내면 `/detections` 발행(마커별 1회만).
+  - **검출 반경 = `coverage_line_spacing * sqrt(2) / 2`**(셀 중심에서 셀 모서리까지의 최대 거리). `coverage_plan.py`가 셀 중심을 방문하는 방식으로 바뀐 뒤에도 한동안 `grid_resolution/2`(0.05m)를 그대로 쓰고 있어서, 셀 안 어디에 있든 마커가 사실상 거의 안 잡히는 버그가 있었다 — `coverage_line_spacing` 기준으로 고침.
   - `true_markers.yaml`은 이 노드만 읽는다 — `control_node`/`gcs_dashboard`는 절대 읽지 않아 "눈가림 탐색"이 유지된다.
 - **`real_perception_node.py`**:
   - 파라미터: `drone_ids`, `wifi_ips`(드론별 AI-deck WiFi IP, `drone_ids`와 순서 일치), `wifi_port`(기본 5000), `marker_size`(기본 0.14m), `camera_intrinsics_path`.
@@ -266,8 +269,9 @@ stateDiagram-v2
 
   - **`true_markers_path`/`/api/all_markers`는 sim 전용 디버그 오버레이**다. `sim.launch.py`만 이 파라미터를 넘기고(`true_markers.yaml` 재사용), `real.launch.py`는 넘기지 않는다 — 그래서 실기체에서는 이 리스트가 항상 빈 배열이라 "찾기 전" 마커가 아예 표시되지 않는다(실제로 모르는 게 맞으니까). control_node는 이 값을 절대 보지 않으므로 미션 로직 자체가 정답을 참고하는 일은 없다.
 - **프론트엔드**(`templates/index.html` + `static/app.js`): Three.js(r128, 로컬 vendoring, 인터넷 불필요) + OrbitControls로 3D 씬 구성.
-  - 화면 오른쪽: 드론별 영상 3개(폴링 방식 `<img>`, 실기체 전용 — 시뮬은 "no signal" 표시).
-  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 커버리지 경로(점선), **방문한 구간은 두꺼운 튜브 메시로 표시**(`/mission/progress`로 받은 `waypoint_index`까지를 그대로 그림 — 클라이언트가 위치로 추측하지 않음. three.js `LineBasicMaterial`의 `linewidth`는 대부분의 브라우저/GPU에서 무시되는 문제가 있어 `TubeGeometry`로 그림), 드론(구+RGB 3축, yaw 회전).
+  - 화면 오른쪽: 드론별 영상 3개(폴링 방식 `<img>`, 실기체 전용 — 시뮬은 "no signal" 표시). 우측 상단 `▶`/`◀` 버튼으로 **패널을 접고 펼 수 있음**(접으면 3D 씬이 그만큼 넓어짐, 접었다 펼 때 Three.js 렌더러/카메라 크기도 다시 맞춤).
+  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, **`coverage_line_spacing` 간격 grid 보조선**(어떤 셀이 어디인지 바닥에서 바로 보이도록), dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 드론(구+RGB 3축, yaw 회전).
+  - **커버리지 경로/방문 기록은 항상 바닥(z≈0)에 투영해서 그림** — 실제 비행은 `uav_cruise_altitude` 고도에서 하지만, 바닥 그림이 "어느 셀을 계획/방문했는지" 한눈에 보이는 지도 역할을 하도록 함. 계획 경로는 점선, **방문한 구간은 두꺼운 튜브 메시**로 표시(`/mission/progress`로 받은 `waypoint_index`까지를 그대로 그림 — 클라이언트가 위치로 추측하지 않음. three.js `LineBasicMaterial`의 `linewidth`는 대부분의 브라우저/GPU에서 무시되는 문제가 있어 `TubeGeometry`로 그림). 실제 고도에서 나는 드론과 바닥 그림을 시각적으로 이어주기 위해, 드론 바로 아래 바닥 점과 드론 사이를 점선으로 연결(tether)한다.
   - **마커 표시**: (sim only) 아직 못 찾은 ground-truth 마커는 회색 원 테두리+흐린 ID 라벨로 위치만 표시, `/detections`로 실제 검출되면 그 자리의 회색 표시가 사라지고 밝은 노란 구+ID 라벨로 바뀐다 — "찾기 전/후"가 시각적으로 뚜렷이 구분됨.
   - 상단 HUD: 현재 미션 phase 텍스트(`/mission/state` 그대로 표시) + Start 버튼(미션 시작 후 자동 비활성화, 버튼 텍스트가 현재 phase로 바뀜).
   - 우측 하단 패널: 발견한 마커 개수(`found/total`, 실기체처럼 total을 모르면 `found`만) + 발견한 마커 ID 목록.

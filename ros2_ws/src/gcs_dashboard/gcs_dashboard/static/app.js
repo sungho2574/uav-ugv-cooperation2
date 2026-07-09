@@ -79,8 +79,10 @@ class GcsScene {
     this.markerPlaceholderGroup = new THREE.Group(); this.scene.add(this.markerPlaceholderGroup);
     this.markerGroup = new THREE.Group(); this.scene.add(this.markerGroup);
     this.droneGroup = new THREE.Group(); this.scene.add(this.droneGroup);
+    this.tetherGroup = new THREE.Group(); this.scene.add(this.tetherGroup);
 
     this.droneMeshes = {};
+    this.tethers = {}; // dashed line from each drone's ground point up to its flying position
     this.markerMeshes = {};
     this.placeholderMeshes = {}; // sim-only "not found yet" ground-truth markers
 
@@ -110,6 +112,21 @@ class GcsScene {
         minx = Math.min(minx, x); maxx = Math.max(maxx, x);
         miny = Math.min(miny, y); maxy = Math.max(maxy, y);
       });
+
+      // Grid lines at each coverage cell boundary, so it's visible on the
+      // ground which cell is which (matches the drones' actual coverage unit).
+      const cell = mapInfo.coverage_line_spacing || 0.5;
+      const gridMat = new THREE.LineBasicMaterial({ color: 0x384049 });
+      const gridPts = [];
+      for (let x = minx; x <= maxx + 1e-6; x += cell) {
+        gridPts.push(w2t(x, miny, 0.003), w2t(x, maxy, 0.003));
+      }
+      for (let y = miny; y <= maxy + 1e-6; y += cell) {
+        gridPts.push(w2t(minx, y, 0.003), w2t(maxx, y, 0.003));
+      }
+      const gridGeom = new THREE.BufferGeometry().setFromPoints(gridPts);
+      this.mapGroup.add(new THREE.LineSegments(gridGeom, gridMat));
+
       const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
       this.controls.target.set(cx, 0, cy);
       this.camera.position.set(cx, Math.max(maxx - minx, maxy - miny) * 1.3 + 3, maxy + 6);
@@ -154,6 +171,11 @@ class GcsScene {
   // on *different* rows can sit close to the current position without being
   // anywhere near "next", which is why cf2/cf3 showed as almost fully
   // "visited" right from the start of the mission.
+  // Planned/visited paths are drawn projected onto the *ground* (z ~ 0) even
+  // though the drone actually flies them at cruise altitude -- keeps the
+  // floor readable as a top-down coverage map. The drone mesh itself still
+  // renders at its real altitude (see setDrones), linked to its ground point
+  // by a dashed vertical line so the two pictures stay connected.
   setPaths(paths, progress) {
     while (this.pathGroup.children.length) this.pathGroup.remove(this.pathGroup.children[0]);
     Object.entries(paths).forEach(([droneId, wps]) => {
@@ -161,13 +183,13 @@ class GcsScene {
       const color = new THREE.Color(FALLBACK_COLORS[droneId] || '#cccccc');
       const visitedUpTo = (progress[droneId] && progress[droneId].waypoint_index) || 0;
 
-      const full = wps.map(([x, y, z]) => w2t(x, y, z));
+      const full = wps.map(([x, y]) => w2t(x, y, 0.004));
       const plannedGeom = new THREE.BufferGeometry().setFromPoints(full);
       this.pathGroup.add(new THREE.Line(
         plannedGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.15, gapSize: 0.1, opacity: 0.5, transparent: true })).computeLineDistances());
 
       const visitedPts = wps.slice(0, Math.min(wps.length, visitedUpTo + 1))
-        .map(([x, y, z]) => w2t(x, y, z));
+        .map(([x, y]) => w2t(x, y, 0.004));
       // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
       // zero-length segment (NaN tangents) which would make the tube vanish.
       const dedup = [];
@@ -260,11 +282,28 @@ class GcsScene {
       // Three.js's Y axis under w2t() -- rotating the whole group about local
       // Y turns the axes helper's local X (red) into the drone's heading.
       mesh.rotation.set(0, -d.yaw, 0);
+
+      // Dashed tether down to the ground point directly below the drone --
+      // paths/visited cells are drawn on the ground (see setPaths), so this
+      // keeps the actually-flying drone visually anchored to its cell.
+      if (this.tethers[d.id]) this.tetherGroup.remove(this.tethers[d.id]);
+      const color = new THREE.Color(zoneColors[d.id] || FALLBACK_COLORS[d.id] || '#ffffff');
+      const tetherGeom = new THREE.BufferGeometry().setFromPoints(
+        [w2t(d.x, d.y, 0.004), w2t(d.x, d.y, d.z)]);
+      const tether = new THREE.Line(
+        tetherGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.08, gapSize: 0.06 }));
+      tether.computeLineDistances();
+      this.tetherGroup.add(tether);
+      this.tethers[d.id] = tether;
     });
     Object.keys(this.droneMeshes).forEach((id) => {
       if (!seen.has(id)) {
         this.droneGroup.remove(this.droneMeshes[id]);
         delete this.droneMeshes[id];
+      }
+      if (!seen.has(id) && this.tethers[id]) {
+        this.tetherGroup.remove(this.tethers[id]);
+        delete this.tethers[id];
       }
     });
   }
@@ -322,6 +361,16 @@ function main() {
 
   const startBtn = document.getElementById('start-btn');
   const markerStatusEl = document.getElementById('marker-status');
+
+  const videoPane = document.getElementById('video-pane');
+  const videoToggle = document.getElementById('video-toggle');
+  const resizeScene = () => gcsScene.onResize(scenePane);
+  videoPane.addEventListener('transitionend', resizeScene);
+  videoToggle.addEventListener('click', () => {
+    const collapsed = videoPane.classList.toggle('collapsed');
+    videoToggle.textContent = collapsed ? '◀' : '▶';
+    resizeScene(); // immediate resize too, in case transitions are disabled
+  });
 
   // Run each render step independently: one step throwing (bad/unexpected data
   // shape, etc.) must not silently prevent the *other* steps from running --

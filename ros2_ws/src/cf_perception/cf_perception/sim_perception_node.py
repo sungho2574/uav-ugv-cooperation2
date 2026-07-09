@@ -54,8 +54,16 @@ class SimPerceptionNode(Node):
             raise RuntimeError('sim_perception_node requires the mission_map_path parameter')
         with open(mission_map_path, 'r') as f:
             mission_map = yaml.safe_load(f)
-        self.grid_resolution = float(mission_map['grid_resolution'])
-        self.detect_radius = self.grid_resolution / 2.0
+        # control_node's coverage plan visits the *center* of each
+        # coverage_line_spacing x line_spacing cell (see coverage_plan.py), so a
+        # marker anywhere inside that cell -- worst case, right in a corner --
+        # must still count as "reached" once the drone visits the cell center.
+        # Corner distance from a cell's center is line_spacing * sqrt(2) / 2;
+        # using grid_resolution here (a much finer, unrelated value) was a
+        # leftover from before the coverage plan moved to cell-based waypoints
+        # and made the detection radius far too small to ever trigger.
+        line_spacing = float(mission_map['coverage_line_spacing'])
+        self.detect_radius = line_spacing * math.sqrt(2) / 2.0
 
         true_markers_path = self.get_parameter('true_markers_path').value
         if not true_markers_path:

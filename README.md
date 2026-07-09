@@ -22,7 +22,7 @@
 ## 1. 시스템 개요
 
 - **하드웨어**: Crazyflie 3대(UAV) + ST-mini 위 Jetson(UGV, 메인 컴퓨터) 1대.
-- **제어 방식**: 완전 중앙집중식. `control_node` 하나가 상태머신을 돌리며 3대 드론을 직접 지휘한다 (분산/합의 알고리즘 없음).
+- **제어 방식**: 완전 중앙집중식. `control_node` 하나가 상태머신을 돌리며 3대 드론을 직접 지휘한다.
 - **시뮬-실기체 이식성**: 위치 텔레메트리(`/cfN/pose`)는 crazyswarm2가 sim/real 백엔드에 상관없이 동일한 토픽으로 제공하므로, 우리 코드가 직접 만드는 것은 "카메라/마커 인식" 부분뿐이다. 이 부분만 `cf_perception` 패키지 안에서 `sim_perception_node`(ground-truth 참고) / `real_perception_node`(실제 영상+ArUco)로 나뉘고, 나머지 노드(`control_node`, `gcs_node`)는 시뮬/실기체 구분 없이 완전히 동일한 코드로 동작한다.
 - **알고리즘 성격**: 임무영역 분할(cellular decomposition)과 커버리지 경로계획(coverage path planning)은 의도적으로 **나이브한 베이스라인**(세로 스트립 분할 + boustrophedon)이다. 비효율적이어도 무방하며, 추후 논문 알고리즘으로 `mission_control` 내부 모듈만 교체하면 되도록 인터페이스를 고정해 두었다.
 - **로버 단계 제외**: 이번 범위는 `/mission/markers` 토픽 발행까지이며, 이 좌표들을 방문하는 UGV 라우팅/실행 노드는 이후 별도로 추가한다.
@@ -151,7 +151,7 @@ flowchart TD
 
 ## 4. 상태 머신
 
-이 시스템의 상태머신은 **`control_node` 하나뿐**이다. 옛 설계처럼 "임무 레벨 FSM + 드론별 서브 FSM(노드)"으로 나누지 않았다 — 중앙집중 제어이므로 드론별 실행 노드를 따로 두지 않고, `control_node`가 각 드론의 waypoint 진행 상태(`wp_index`, `done` 플래그)를 **내부 변수로만** 들고 있다. 따라서 상태 다이어그램은 아래 하나로 충분하다.
+이 시스템의 상태머신은 **`control_node` 하나뿐**이다. 중앙집중 제어이므로 드론별 실행 노드를 따로 두지 않고, `control_node`가 각 드론의 waypoint 진행 상태(`wp_index`, `done` 플래그)를 **내부 변수로만** 들고 있다. 따라서 상태 다이어그램은 아래 하나로 충분하다.
 
 `COVERING` 상태 내부에서 드론별로 추적하는 값은 다음과 같다 (별도 상태머신이 아니라 `COVERING` 상태 안의 보조 데이터임을 참고):
 
@@ -185,16 +185,16 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DECOMPOSE: 노드 생성자 완료(지도 로드,\n서비스 클라이언트 준비)
+    [*] --> DECOMPOSE: 노드 생성자 완료(지도 로드,<br>서비스 클라이언트 준비)
     DECOMPOSE --> PLAN: 항상 (zone_split 완료)
     PLAN --> PUBLISH_PLAN: 항상 (coverage_plan 완료)
     PUBLISH_PLAN --> AWAITING_START: 항상 (zones/paths 토픽 발행 완료)
-    AWAITING_START --> TAKEOFF: /mission/start 서비스 호출됨\n(또는 start_immediately=true)
-    TAKEOFF --> COVERING: takeoff 전송 후\ntakeoff_duration+takeoff_settle_time 경과
-    COVERING --> COVERING: leg_deadline 경과 &&\n일부 드론 waypoint 남음
+    AWAITING_START --> TAKEOFF: /mission/start 서비스 호출됨<br>(또는 start_immediately=true)
+    TAKEOFF --> COVERING: takeoff 전송 후<br>takeoff_duration+takeoff_settle_time 경과
+    COVERING --> COVERING: leg_deadline 경과 &&<br>일부 드론 waypoint 남음
     COVERING --> RETURN_HOME: 모든 드론 waypoint 소진(done=true)
-    RETURN_HOME --> LAND: 홈 이동 명령 후\n소요시간+leg_settle_margin 경과
-    LAND --> PUBLISH_MARKERS: land 전송 후\nland_duration+land_settle_time 경과
+    RETURN_HOME --> LAND: 홈 이동 명령 후<br>소요시간+leg_settle_margin 경과
+    LAND --> PUBLISH_MARKERS: land 전송 후<br>land_duration+land_settle_time 경과
     PUBLISH_MARKERS --> DONE: 항상 (/mission/markers 발행 완료)
 ```
 

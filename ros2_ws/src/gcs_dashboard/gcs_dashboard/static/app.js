@@ -192,17 +192,23 @@ class GcsScene {
       seen.add(d.id);
       if (!this.droneMeshes[d.id]) {
         const color = new THREE.Color(zoneColors[d.id] || FALLBACK_COLORS[d.id] || '#ffffff');
-        const geom = new THREE.ConeGeometry(0.12, 0.28, 8);
+        const geom = new THREE.SphereGeometry(0.1, 16, 16);
         const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color }));
+        const axes = new THREE.AxesHelper(0.3);
+        axes.material.depthTest = false;
+        mesh.add(axes);
         const label = makeTextSprite(d.id, '#' + color.getHexString());
-        label.position.set(0, 0.35, 0);
+        label.position.set(0, 0.3, 0);
         mesh.add(label);
         this.droneGroup.add(mesh);
         this.droneMeshes[d.id] = mesh;
       }
       const mesh = this.droneMeshes[d.id];
       mesh.position.copy(w2t(d.x, d.y, d.z));
-      mesh.rotation.set(Math.PI / 2, 0, -d.yaw);
+      // yaw is rotation about the world's vertical (Z) axis, which maps to
+      // Three.js's Y axis under w2t() -- rotating the whole group about local
+      // Y turns the axes helper's local X (red) into the drone's heading.
+      mesh.rotation.set(0, -d.yaw, 0);
     });
     Object.keys(this.droneMeshes).forEach((id) => {
       if (!seen.has(id)) {

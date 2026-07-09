@@ -246,7 +246,7 @@ stateDiagram-v2
 
 - 빌드 타입: `ament_python`. 의존: `flask`, `opencv-python`, `PyYAML`, `cv_bridge`.
 - **`gcs_node.py`**: rclpy 노드를 백그라운드 스레드에서 `spin`시키며 스레드락 걸린 `SharedState`를 갱신하고, Flask(메인 스레드)가 그 스냅샷을 REST로 서빙한다 (`dashboard_aruco.py`와 동일한 아키텍처 패턴).
-  - 파라미터: `drone_ids`, `port`(기본 5000), `mission_map_path`(정적 지도 정보라 토픽 대신 직접 로드 — `true_markers.yaml`과 달리 사전에 공개된 정보이므로 문제 없음).
+  - 파라미터: `drone_ids`, `port`(기본 5000), `mission_map_path`(정적 지도 정보라 토픽 대신 직접 로드 — `true_markers.yaml`과 달리 사전에 공개된 정보이므로 문제 없음), `true_markers_path`(선택, **sim 전용 디버그 오버레이** — 아래 참고).
   - REST 엔드포인트:
 
     | 엔드포인트              | 메서드 | 내용                                                                                    |
@@ -254,13 +254,17 @@ stateDiagram-v2
     | `/`                     | GET    | 대시보드 HTML 페이지                                                                    |
     | `/api/state`            | GET    | `{drones, markers, zones, paths, mission_state}` JSON 스냅샷 (프론트가 300ms 주기 폴링) |
     | `/api/map`              | GET    | `{boundary, dead_zones}` (최초 1회 로드)                                                |
+    | `/api/all_markers`      | GET    | (sim 전용, 실기체는 항상 `[]`) ground-truth 마커 전체 목록, 최초 1회 로드              |
     | `/api/frame/<drone_id>` | GET    | 최신 JPEG 프레임 (없으면 204)                                                           |
     | `/api/mission/start`    | POST   | `/mission/start` Trigger 서비스 호출 (GCS의 "Start Mission" 버튼)                       |
 
+  - **`true_markers_path`/`/api/all_markers`는 sim 전용 디버그 오버레이**다. `sim.launch.py`만 이 파라미터를 넘기고(`true_markers.yaml` 재사용), `real.launch.py`는 넘기지 않는다 — 그래서 실기체에서는 이 리스트가 항상 빈 배열이라 "찾기 전" 마커가 아예 표시되지 않는다(실제로 모르는 게 맞으니까). control_node는 이 값을 절대 보지 않으므로 미션 로직 자체가 정답을 참고하는 일은 없다.
 - **프론트엔드**(`templates/index.html` + `static/app.js`): Three.js(r128, 로컬 vendoring, 인터넷 불필요) + OrbitControls로 3D 씬 구성.
   - 화면 오른쪽: 드론별 영상 3개(폴링 방식 `<img>`, 실기체 전용 — 시뮬은 "no signal" 표시).
-  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 커버리지 경로(점선), **방문한 구간은 실선으로 굵게**(클라이언트에서 드론 현재 위치와 가장 가까운 경로 인덱스를 찾아 그 이전 구간을 "방문"으로 렌더링 — 별도 피드백 토픽 불필요), 마커(노란 구+ID 라벨), 드론(콘 모양 아이콘 + yaw 회전).
-  - 상단 HUD: 현재 미션 phase 텍스트(`/mission/state` 그대로 표시) + Start 버튼.
+  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 커버리지 경로(점선), **방문한 구간은 실선으로 굵게**(클라이언트에서 드론 현재 위치와 가장 가까운 경로 인덱스를 찾아 그 이전 구간을 "방문"으로 렌더링 — 별도 피드백 토픽 불필요), 드론(구+RGB 3축, yaw 회전).
+  - **마커 표시**: (sim only) 아직 못 찾은 ground-truth 마커는 회색 원 테두리+흐린 ID 라벨로 위치만 표시, `/detections`로 실제 검출되면 그 자리의 회색 표시가 사라지고 밝은 노란 구+ID 라벨로 바뀐다 — "찾기 전/후"가 시각적으로 뚜렷이 구분됨.
+  - 상단 HUD: 현재 미션 phase 텍스트(`/mission/state` 그대로 표시) + Start 버튼(미션 시작 후 자동 비활성화, 버튼 텍스트가 현재 phase로 바뀜).
+  - 우측 하단 패널: 발견한 마커 개수(`found/total`, 실기체처럼 total을 모르면 `found`만) + 발견한 마커 ID 목록.
 
 ## 9. 런치 파일 구조
 

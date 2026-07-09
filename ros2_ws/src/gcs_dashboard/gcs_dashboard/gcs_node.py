@@ -97,9 +97,11 @@ class GcsNode(Node):
         self.declare_parameter('drone_ids', ['cf1', 'cf2', 'cf3'])
         self.declare_parameter('port', 5000)
         self.declare_parameter('mission_map_path', '')
+        self.declare_parameter('true_markers_path', '')
         self.drone_ids = list(self.get_parameter('drone_ids').value)
         self.port = self.get_parameter('port').value
         self.map_info = self._load_map_info(self.get_parameter('mission_map_path').value)
+        self.all_markers = self._load_all_markers(self.get_parameter('true_markers_path').value)
 
         self.create_subscription(DroneState, '/states', self._on_state, 20)
         self.create_subscription(MarkerDetection, '/detections', self._on_detection, 20)
@@ -129,6 +131,23 @@ class GcsNode(Node):
             'boundary': data.get('boundary', []),
             'dead_zones': [dz.get('points', []) for dz in data.get('dead_zones', [])],
         }
+
+    def _load_all_markers(self, path):
+        """Sim-only debug overlay: true_markers.yaml ground truth, purely for showing
+        "not found yet" marker placeholders on the ground. On real hardware this
+        parameter is left unset (real.launch.py never passes it) so this list stays
+        empty and the dashboard only ever shows markers once actually /detections'd --
+        exactly as it should be, since real ground truth genuinely isn't known ahead
+        of time. control_node never sees this list either way, so mission logic
+        itself is never able to "cheat" off of it."""
+        if not path:
+            return []
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
+        return [
+            {'id': m['id'], 'x': m['x'], 'y': m['y'], 'z': m.get('z', 0.0)}
+            for m in data.get('markers', [])
+        ]
 
     def _on_state(self, msg: DroneState):
         self.shared.update_drone(
@@ -206,6 +225,13 @@ def api_state():
 @app.route('/api/map')
 def api_map():
     return jsonify(ros_node.map_info if ros_node else {'boundary': [], 'dead_zones': []})
+
+
+@app.route('/api/all_markers')
+def api_all_markers():
+    """Sim-only ground-truth marker list (empty on real hardware). See
+    GcsNode._load_all_markers for why this can never leak into control_node."""
+    return jsonify(ros_node.all_markers if ros_node else [])
 
 
 @app.route('/api/frame/<drone_id>')

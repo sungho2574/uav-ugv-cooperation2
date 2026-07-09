@@ -29,7 +29,16 @@ def _ordered_subpolygons(zone_geom, start_xy):
 
 
 def _sweep_polygon(poly, line_spacing):
-    """Return an ordered list of (x, y) waypoints covering `poly` with scan lines."""
+    """Return an ordered list of (x, y) waypoints covering `poly` with scan lines.
+
+    A scan line can hit more than one disjoint segment when a dead-zone hole
+    sits in the middle of it (left-of-hole / right-of-hole). Connecting those
+    segments directly, end to end, would fly the straight-line "go_to" leg
+    right over the hole. Instead we detour through whichever polygon edge
+    (bottom/top of this sub-polygon's bounds) is closer -- dead-zone holes are
+    strictly interior, so that edge is always clear -- before continuing the
+    next segment. Adds extra travel but never overflies a dead zone.
+    """
     minx, miny, maxx, maxy = poly.bounds
     waypoints = []
     left_to_right = True
@@ -47,12 +56,18 @@ def _sweep_polygon(poly, line_spacing):
             segments.sort(key=lambda s: s.bounds[0])
             if not left_to_right:
                 segments = segments[::-1]
+            prev_x = None
+            safe_y = miny if (y - miny) <= (maxy - y) else maxy
             for seg in segments:
                 x0, x1 = seg.bounds[0], seg.bounds[2]
                 if not left_to_right:
                     x0, x1 = x1, x0
+                if prev_x is not None:
+                    waypoints.append((prev_x, safe_y))
+                    waypoints.append((x0, safe_y))
                 waypoints.append((x0, y))
                 waypoints.append((x1, y))
+                prev_x = x1
         left_to_right = not left_to_right
         y += line_spacing
     return waypoints

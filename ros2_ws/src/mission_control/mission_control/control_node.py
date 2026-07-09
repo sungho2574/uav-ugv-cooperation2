@@ -125,6 +125,7 @@ class ControlNode(Node):
         self.declare_parameter('land_duration', 2.5)
         self.declare_parameter('land_settle_time', 3.0)
         self.declare_parameter('start_immediately', False)
+        self.declare_parameter('dead_zone_margin', 0.15)
 
         self.cruise_speed = self.get_parameter('cruise_speed').value
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
@@ -133,6 +134,7 @@ class ControlNode(Node):
         self.takeoff_settle_time = self.get_parameter('takeoff_settle_time').value
         self.land_duration = self.get_parameter('land_duration').value
         self.land_settle_time = self.get_parameter('land_settle_time').value
+        self.dead_zone_margin = self.get_parameter('dead_zone_margin').value
 
         mission_map_path = self.get_parameter('mission_map_path').value
         if not mission_map_path:
@@ -233,7 +235,7 @@ class ControlNode(Node):
         dead_zones = [
             [tuple(p) for p in dz['points']] for dz in self.mission_map.get('dead_zones', [])
         ]
-        self.free_space = build_free_space(boundary, dead_zones)
+        self.free_space = build_free_space(boundary, dead_zones, self.dead_zone_margin)
         self.zone_geoms = assign_zones_to_drones(self.free_space, self.mission_map['drones'])
 
     def _do_plan(self):

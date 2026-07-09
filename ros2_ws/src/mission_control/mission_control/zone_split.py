@@ -13,9 +13,21 @@ plan; a smarter decomposition algorithm will replace this module later.
 from shapely.geometry import Polygon, box
 
 
-def build_free_space(boundary_points, dead_zone_point_lists):
-    """boundary_points: [(x, y), ...] CCW. dead_zone_point_lists: [[(x, y), ...], ...]."""
-    return Polygon(boundary_points, holes=dead_zone_point_lists)
+def build_free_space(boundary_points, dead_zone_point_lists, dead_zone_margin=0.0):
+    """boundary_points: [(x, y), ...] CCW. dead_zone_point_lists: [[(x, y), ...], ...].
+
+    dead_zone_margin buffers each dead-zone hole outward before subtracting it,
+    so planned coverage lines keep real clearance from the obstacle instead of
+    potentially grazing its exact boundary (which can happen when the sweep
+    line spacing happens to line up with a dead-zone edge coordinate).
+    """
+    free = Polygon(boundary_points)
+    for dz_points in dead_zone_point_lists:
+        hole = Polygon(dz_points)
+        if dead_zone_margin > 0:
+            hole = hole.buffer(dead_zone_margin)
+        free = free.difference(hole)
+    return free
 
 
 def split_into_strips(free_space, num_zones):

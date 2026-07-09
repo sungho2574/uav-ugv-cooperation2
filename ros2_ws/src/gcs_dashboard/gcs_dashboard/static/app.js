@@ -47,6 +47,16 @@ function lineLoopFromPoints(points, color, yLift) {
   return new THREE.Line(geom, new THREE.LineBasicMaterial({ color }));
 }
 
+function circlePoints(cx, cy, radius, segments) {
+  const pts = [];
+  const n = segments || 20;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    pts.push([cx + radius * Math.cos(a), cy + radius * Math.sin(a)]);
+  }
+  return pts;
+}
+
 class GcsScene {
   constructor(container) {
     this.scene = new THREE.Scene();
@@ -72,11 +82,13 @@ class GcsScene {
     this.mapGroup = new THREE.Group(); this.scene.add(this.mapGroup);
     this.zoneGroup = new THREE.Group(); this.scene.add(this.zoneGroup);
     this.pathGroup = new THREE.Group(); this.scene.add(this.pathGroup);
+    this.markerPlaceholderGroup = new THREE.Group(); this.scene.add(this.markerPlaceholderGroup);
     this.markerGroup = new THREE.Group(); this.scene.add(this.markerGroup);
     this.droneGroup = new THREE.Group(); this.scene.add(this.droneGroup);
 
     this.droneMeshes = {};
     this.markerMeshes = {};
+    this.placeholderMeshes = {}; // sim-only "not found yet" ground-truth markers
     this.visitedHighWaterMark = {}; // droneId -> last known "flown up to" waypoint index
 
     window.addEventListener('resize', () => this.onResize(container));
@@ -178,6 +190,25 @@ class GcsScene {
     });
   }
 
+  // Sim-only debug overlay: all ground-truth marker positions, dim/outlined
+  // since they haven't actually been "found" by a drone's camera yet. Empty
+  // on real hardware (gcs_node never gets true_markers_path there), so this
+  // is a no-op and nothing pre-known ever shows up -- exactly as it should be.
+  setAllMarkers(allMarkers) {
+    while (this.markerPlaceholderGroup.children.length) {
+      this.markerPlaceholderGroup.remove(this.markerPlaceholderGroup.children[0]);
+    }
+    this.placeholderMeshes = {};
+    allMarkers.forEach((m) => {
+      const circle = lineLoopFromPoints(circlePoints(m.x, m.y, 0.14), 0x888888, 0.006);
+      const label = makeTextSprite('#' + m.id, '#888888');
+      label.position.copy(w2t(m.x, m.y, (m.z || 0) + 0.25));
+      this.markerPlaceholderGroup.add(circle);
+      this.markerPlaceholderGroup.add(label);
+      this.placeholderMeshes[m.id] = [circle, label];
+    });
+  }
+
   setMarkers(markers) {
     const seen = new Set();
     markers.forEach((m) => {
@@ -191,6 +222,10 @@ class GcsScene {
         mesh.add(label);
         this.markerGroup.add(mesh);
         this.markerMeshes[m.id] = mesh;
+        // "before -> after found": once real detection arrives, the dim
+        // ground-truth placeholder (if any) is replaced by the bright marker.
+        const placeholder = this.placeholderMeshes[m.id];
+        if (placeholder) placeholder.forEach((obj) => { obj.visible = false; });
       }
       this.markerMeshes[m.id].position.copy(w2t(m.x, m.y, m.z));
     });
@@ -282,7 +317,14 @@ function main() {
 
   fetch('/api/map').then((r) => r.json()).then((map) => gcsScene.setMap(map));
 
+  let totalMarkerCount = null; // null = unknown (real hardware / no ground truth)
+  fetch('/api/all_markers').then((r) => r.json()).then((allMarkers) => {
+    totalMarkerCount = allMarkers.length || null;
+    gcsScene.setAllMarkers(allMarkers);
+  });
+
   const startBtn = document.getElementById('start-btn');
+  const markerStatusEl = document.getElementById('marker-status');
 
   // Run each render step independently: one step throwing (bad/unexpected data
   // shape, etc.) must not silently prevent the *other* steps from running --
@@ -316,6 +358,16 @@ function main() {
         state.paths || {}, state.drones || [], zoneColors, state.mission_state));
       safeCall('setMarkers', () => gcsScene.setMarkers(state.markers || []));
       safeCall('setDrones', () => gcsScene.setDrones(state.drones || [], zoneColors));
+      safeCall('marker-status', () => {
+        const found = (state.markers || []).slice().sort((a, b) => a.id - b.id);
+        const countText = totalMarkerCount != null
+          ? `${found.length}/${totalMarkerCount}` : `${found.length}`;
+        const idList = found.length
+          ? found.map((m) => '#' + m.id).join(', ') : '(없음)';
+        markerStatusEl.innerHTML =
+          `<div class="marker-count">발견한 마커: ${countText}</div>` +
+          `<div class="marker-ids">${idList}</div>`;
+      });
     }).catch((err) => {
       console.error('gcs /api/state poll failed:', err);
     }).finally(() => setTimeout(pollState, 300));

@@ -72,6 +72,7 @@ def generate_launch_description():
         parameters=[{
             'drone_ids': drone_ids,
             'mission_map_path': mission_map_path,
+            'true_markers_path': true_markers_path,
             'port': 5000,
         }],
     )

@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """Sim-mode Crazyflie telemetry + marker-detection stand-in.
 
-Replaces the camera pipeline used on real hardware: subscribes to each
-Crazyflie's /cfN/pose (published by crazyswarm2's sim backend, identical
-topic to the real backend) and republishes it as /states. Instead of running
-ArUco detection on video, it checks the true (ground-truth) marker positions
-loaded from true_markers.yaml -- a file that ONLY this node reads -- and
-publishes a /detections message once a drone's live position lands inside a
-marker's grid cell. control_node and gcs_dashboard never see the ground
-truth file, so the search is still "blind" from their point of view, matching
-what would happen with a real camera.
+Replaces the camera pipeline used on real hardware. IMPORTANT: crazyswarm2's
+*sim* backend (crazyflie_sim/crazyflie_server.py) does NOT publish /cfN/pose
+at all -- that topic only exists on the real/cflib backend (driven by
+firmware_logging). The sim backend's default "rviz" visualization plugin
+instead broadcasts a world->cfN transform on /tf on every physics step. So
+this node looks up that transform via tf2 (on a timer) instead of
+subscribing to /cfN/pose. Republishes as /states either way, so downstream
+nodes (control_node, gcs_dashboard) don't need to know the difference.
+
+Instead of running ArUco detection on video, it checks the true (ground-truth)
+marker positions loaded from true_markers.yaml -- a file that ONLY this node
+reads -- and publishes a /detections message once a drone's live position
+lands inside a marker's grid cell. control_node and gcs_dashboard never see
+the ground truth file, so the search is still "blind" from their point of
+view, matching what would happen with a real camera.
 """
 import math
 
 import rclpy
 import yaml
 from rclpy.node import Node
+from rclpy.time import Time
 
-from geometry_msgs.msg import PoseStamped
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+
 from mission_interfaces.msg import DroneState, MarkerDetection
 
 
@@ -33,8 +43,11 @@ class SimPerceptionNode(Node):
         self.declare_parameter('drone_ids', ['cf1', 'cf2', 'cf3'])
         self.declare_parameter('true_markers_path', '')
         self.declare_parameter('mission_map_path', '')
+        self.declare_parameter('world_frame', 'world')
+        self.declare_parameter('poll_rate_hz', 10.0)
 
         self.drone_ids = list(self.get_parameter('drone_ids').value)
+        self.world_frame = self.get_parameter('world_frame').value
 
         mission_map_path = self.get_parameter('mission_map_path').value
         if not mission_map_path:
@@ -56,32 +69,33 @@ class SimPerceptionNode(Node):
         self.states_pub = self.create_publisher(DroneState, '/states', 10)
         self.detections_pub = self.create_publisher(MarkerDetection, '/detections', 10)
 
-        self.pose_subs = []
-        for drone_id in self.drone_ids:
-            sub = self.create_subscription(
-                PoseStamped, f'/{drone_id}/pose',
-                self._make_pose_callback(drone_id), 10)
-            self.pose_subs.append(sub)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        poll_rate_hz = self.get_parameter('poll_rate_hz').value
+        self.create_timer(1.0 / poll_rate_hz, self._on_tf_poll)
 
         self.get_logger().info(
-            f'sim_perception_node watching {self.drone_ids}, '
+            f'sim_perception_node polling tf {self.world_frame}->{self.drone_ids}, '
             f'{len(self.true_markers)} ground-truth markers loaded')
 
-    def _make_pose_callback(self, drone_id):
-        def callback(msg: PoseStamped):
-            self._on_pose(drone_id, msg)
-        return callback
+    def _on_tf_poll(self):
+        for drone_id in self.drone_ids:
+            try:
+                tf = self.tf_buffer.lookup_transform(self.world_frame, drone_id, Time())
+            except (LookupException, ConnectivityException, ExtrapolationException):
+                continue
+            self._on_transform(drone_id, tf)
 
-    def _on_pose(self, drone_id, msg: PoseStamped):
-        x = msg.pose.position.x
-        y = msg.pose.position.y
-        z = msg.pose.position.z
-        yaw = quat_to_yaw(msg.pose.orientation)
+    def _on_transform(self, drone_id, tf):
+        x = tf.transform.translation.x
+        y = tf.transform.translation.y
+        z = tf.transform.translation.z
+        yaw = quat_to_yaw(tf.transform.rotation)
 
         state = DroneState()
-        state.header = msg.header
-        if not state.header.frame_id:
-            state.header.frame_id = 'map'
+        state.header.stamp = tf.header.stamp
+        state.header.frame_id = self.world_frame
         state.drone_id = drone_id
         state.position.x = x
         state.position.y = y

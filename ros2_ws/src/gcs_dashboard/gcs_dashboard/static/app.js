@@ -208,8 +208,11 @@ class GcsScene {
       seen.add(d.id);
       if (!this.droneMeshes[d.id]) {
         const color = new THREE.Color(zoneColors[d.id] || FALLBACK_COLORS[d.id] || '#ffffff');
-        const geom = new THREE.SphereGeometry(0.1, 16, 16);
-        const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color }));
+        const geom = new THREE.SphereGeometry(0.12, 16, 16);
+        // MeshBasicMaterial (unlit) so the drone stays clearly visible regardless
+        // of scene lighting -- matches the marker spheres, which use the same
+        // approach and were visible even when the (lit) drone sphere wasn't.
+        const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color }));
         const axes = new THREE.AxesHelper(0.3);
         axes.material.depthTest = false;
         mesh.add(axes);
@@ -279,27 +282,58 @@ function main() {
 
   fetch('/api/map').then((r) => r.json()).then((map) => gcsScene.setMap(map));
 
+  const startBtn = document.getElementById('start-btn');
+
+  // Run each render step independently: one step throwing (bad/unexpected data
+  // shape, etc.) must not silently prevent the *other* steps from running --
+  // that's what was hiding the drone icons earlier (an earlier step's
+  // exception meant setDrones() below it in the chain never ran, and the
+  // blanket .catch(() => {}) swallowed the error with no console trace).
+  function safeCall(label, fn) {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`gcs render step "${label}" failed:`, err);
+    }
+  }
+
   let zoneColors = {};
   const pollState = () => {
     fetch('/api/state').then((r) => r.json()).then((state) => {
-      document.getElementById('phase-text').textContent = state.mission_state;
+      safeCall('phase-text', () => {
+        document.getElementById('phase-text').textContent = state.mission_state;
+      });
+      safeCall('start-btn', () => {
+        const canStart = state.mission_state === 'AWAITING_START';
+        startBtn.disabled = !canStart;
+        startBtn.textContent = canStart ? 'Start Mission' : `Mission ${state.mission_state}`;
+      });
       zoneColors = {};
-      state.zones.forEach((z) => { zoneColors[z.drone_id] = z.color; });
-      gcsScene.setZones(state.zones);
-      buildLegend(state.zones);
-      gcsScene.setPaths(state.paths, state.drones, zoneColors, state.mission_state);
-      gcsScene.setMarkers(state.markers);
-      gcsScene.setDrones(state.drones, zoneColors);
-    }).catch(() => {}).finally(() => setTimeout(pollState, 300));
+      (state.zones || []).forEach((z) => { zoneColors[z.drone_id] = z.color; });
+      safeCall('setZones', () => gcsScene.setZones(state.zones || []));
+      safeCall('buildLegend', () => buildLegend(state.zones || []));
+      safeCall('setPaths', () => gcsScene.setPaths(
+        state.paths || {}, state.drones || [], zoneColors, state.mission_state));
+      safeCall('setMarkers', () => gcsScene.setMarkers(state.markers || []));
+      safeCall('setDrones', () => gcsScene.setDrones(state.drones || [], zoneColors));
+    }).catch((err) => {
+      console.error('gcs /api/state poll failed:', err);
+    }).finally(() => setTimeout(pollState, 300));
   };
   pollState();
 
   (window.DRONE_IDS || []).forEach(pollVideo);
 
-  document.getElementById('start-btn').addEventListener('click', () => {
+  startBtn.addEventListener('click', () => {
+    startBtn.disabled = true;
     fetch('/api/mission/start', { method: 'POST' }).then((r) => r.json()).then((res) => {
-      if (!res.success) alert('mission start failed: ' + res.message);
-    });
+      if (!res.success) {
+        alert('mission start failed: ' + res.message);
+        startBtn.disabled = false;
+      }
+      // On success the next /api/state poll will flip mission_state away from
+      // AWAITING_START and keep the button disabled from there on.
+    }).catch(() => { startBtn.disabled = false; });
   });
 
   function animate() {

@@ -126,6 +126,7 @@ ros2 service call /mission/start std_srvs/srv/Trigger
 |---|---|
 | `control_node`가 시작하자마자 예외로 죽음 | `mission_map_path` 파라미터가 올바른 절대경로로 전달됐는지 (launch 파일에서 `get_package_share_directory` 사용, 빌드 후 재실행했는지) |
 | 로그에 `takeoff service not available` 경고 | crazyswarm2의 `crazyflie_server`가 아직 기동 전이거나 실패함 — `ros2 node list`로 `crazyflie_server` 존재 확인, `crazyflies.yaml`의 `uri`/`enabled` 재확인 |
+| 시뮬에서 `/states`, `/detections`가 전혀 안 나옴, `/cfN/pose`는 `topic list`엔 있지만 `echo`/`hz`엔 아무것도 안 나옴 | sim 백엔드는 `/cfN/pose`를 발행하지 않는 게 정상 (`crazyflie_sim`의 알려진 동작 — `sim_perception_node`가 `/tf`를 tf2로 조회하도록 되어 있음). `ros2 topic echo /tf`에 `world`→`cf1` 등 변환이 오는지, `crazyflies.yaml`의 `reference_frame`이 `sim_perception_node`의 `world_frame` 파라미터(기본 `world`)와 일치하는지 확인 |
 | 시뮬에서 마커가 하나도 안 잡힘 | `true_markers.yaml` 좌표가 `boundary`/`dead_zones`와 실제로 겹치지 않는지, `coverage_line_spacing`이 마커를 지나치는 간격은 아닌지 |
 | GCS 3D 뷰에 zone/경로가 안 보임 | `/mission/zones`, `/mission/coverage_paths`가 실제 발행됐는지(`ros2 topic echo ... --once`), gcs_node가 해당 토픽에 대해 같은 QoS(Transient Local)로 구독 중인지(코드 그대로면 문제 없음) |
 | 실기체 영상은 뜨는데 마커 world 좌표가 명백히 틀림 | `camera_intrinsics.yaml` 캘리브레이션 여부, `R_CAM_TO_BODY` 장착각 가정, `/cfN/pose`와 프레임 캡처 시각 차이(0.2초 동기화 허용오차) 확인 |

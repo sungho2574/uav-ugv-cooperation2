@@ -72,14 +72,19 @@ class DroneHandle:
 
         self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
         # arrived_index: last waypoint the drone has actually finished flying to
-        # (index 0 == home, true immediately -- see plan_coverage). pending_index:
-        # index it's currently *in flight toward*, becomes arrived_index only once
-        # that leg's deadline passes. Published progress must reflect arrived_index,
-        # not "index we just sent a command for" -- otherwise the GCS paints a
-        # waypoint as visited the instant it's commanded, before the drone has
-        # actually gotten anywhere near it.
+        # (index 0 == home, true immediately -- see plan_coverage). pending_index/
+        # pending_target_xy: the waypoint it's currently in flight toward.
+        # arrived_index is only promoted once the *measured* position (/states)
+        # is actually within arrival_radius of pending_target_xy (leg_deadline is
+        # just a fallback timeout for when telemetry is missing/stale) --
+        # otherwise the GCS paints a cell as visited (and, worse, looks done
+        # before /detections even has a chance to fire) purely because our
+        # duration *estimate* elapsed, regardless of whether the drone is
+        # actually there yet.
         self.arrived_index = 0
         self.pending_index = 0
+        self.pending_target_xy = (home_position[0], home_position[1])
+        self.leg_deadline = None
         self.done = False
         self.last_target_xy = (home_position[0], home_position[1])
 
@@ -134,6 +139,7 @@ class ControlNode(Node):
         self.declare_parameter('land_settle_time', 3.0)
         self.declare_parameter('start_immediately', False)
         self.declare_parameter('dead_zone_margin', 0.15)
+        self.declare_parameter('arrival_radius', 0.1)
 
         self.cruise_speed = self.get_parameter('cruise_speed').value
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
@@ -143,6 +149,7 @@ class ControlNode(Node):
         self.land_duration = self.get_parameter('land_duration').value
         self.land_settle_time = self.get_parameter('land_settle_time').value
         self.dead_zone_margin = self.get_parameter('dead_zone_margin').value
+        self.arrival_radius = self.get_parameter('arrival_radius').value
 
         mission_map_path = self.get_parameter('mission_map_path').value
         if not mission_map_path:
@@ -197,7 +204,6 @@ class ControlNode(Node):
 
         self.state = 'DECOMPOSE'
         self._phase_deadline = None
-        self._leg_deadline = None
         self._takeoff_sent = False
         self._land_sent = False
 
@@ -340,53 +346,35 @@ class ControlNode(Node):
             self._set_state('COVERING')
 
     def _init_covering(self):
+        now = time.monotonic()
         for handle in self.drones.values():
             handle.arrived_index = 0
             handle.pending_index = 0
+            handle.pending_target_xy = (handle.home_position[0], handle.home_position[1])
+            handle.leg_deadline = None
             handle.done = len(handle.waypoints) <= 1
             handle.last_target_xy = (handle.home_position[0], handle.home_position[1])
-        self._send_next_leg_for_all(time.monotonic())
-
-    def _send_next_leg_for_all(self, now):
-        """Advance every still-active drone by one waypoint.
-
-        Only called once the *previous* leg's deadline has passed (from
-        _step_covering, or once at covering start from _init_covering), so
-        `pending_index` -- the target we sent last time -- can now be trusted
-        as actually reached: promote it to `arrived_index` before picking the
-        next target. Publishing progress using `arrived_index` (rather than
-        "whichever index we just commanded") is what makes the GCS's visited-
-        path fill in as the drone actually gets there, instead of the instant
-        the command is sent.
-        """
-        max_duration = 0.0
-        any_active = False
-        for handle in self.drones.values():
-            if handle.done:
-                continue
-            handle.arrived_index = handle.pending_index
-            next_idx = handle.arrived_index + 1
-            if next_idx >= len(handle.waypoints):
-                handle.done = True
-                continue
-            target_xy = handle.waypoints[next_idx]
-            current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
-            leg_dist = dist2d(current_xy, target_xy)
-            duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
-            handle.send_go_to(
-                (target_xy[0], target_xy[1], self.cruise_altitude), 0.0, duration)
-            handle.last_target_xy = target_xy
-            handle.pending_index = next_idx
-            max_duration = max(max_duration, duration)
-            any_active = True
-
+            if not handle.done:
+                self._send_next_leg(handle, now)
         self._publish_progress()
 
-        if not any_active:
-            self._returning_sent = False
-            self._set_state('RETURN_HOME')
+    def _send_next_leg(self, handle, now):
+        """Command `handle` toward its next waypoint. Each drone advances
+        independently of the others -- there is no shared "wait for everyone"
+        gate, since crazyswarm2 already flies each drone's go_to independently."""
+        next_idx = handle.arrived_index + 1
+        if next_idx >= len(handle.waypoints):
+            handle.done = True
             return
-        self._leg_deadline = now + max_duration + self.leg_settle_margin
+        target_xy = handle.waypoints[next_idx]
+        current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
+        leg_dist = dist2d(current_xy, target_xy)
+        duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
+        handle.send_go_to((target_xy[0], target_xy[1], self.cruise_altitude), 0.0, duration)
+        handle.last_target_xy = target_xy
+        handle.pending_index = next_idx
+        handle.pending_target_xy = target_xy
+        handle.leg_deadline = now + duration + self.leg_settle_margin
 
     def _publish_progress(self):
         array = DroneProgressArray()
@@ -399,8 +387,35 @@ class ControlNode(Node):
         self.progress_pub.publish(array)
 
     def _step_covering(self, now):
-        if now >= self._leg_deadline:
-            self._send_next_leg_for_all(now)
+        """Promote arrived_index only once the *measured* position (/states)
+        actually confirms the drone is within arrival_radius of its current
+        target -- not just because our estimated leg duration elapsed. An
+        estimate-only timer marked "arrived" (and painted the GCS cell/tube)
+        before the drone had actually gotten there whenever the real flight
+        ran a bit slower than the distance/cruise_speed estimate; the
+        per-drone `leg_deadline` is kept only as a fallback in case telemetry
+        is missing or stale, so a drone can't stall forever.
+        """
+        progress_changed = False
+        for handle in self.drones.values():
+            if handle.done:
+                continue
+            current_xy = self.live_xy.get(handle.drone_id)
+            arrived = (
+                current_xy is not None
+                and dist2d(current_xy, handle.pending_target_xy) <= self.arrival_radius)
+            timed_out = handle.leg_deadline is not None and now >= handle.leg_deadline
+            if arrived or timed_out:
+                handle.arrived_index = handle.pending_index
+                progress_changed = True
+                self._send_next_leg(handle, now)
+
+        if progress_changed:
+            self._publish_progress()
+
+        if all(handle.done for handle in self.drones.values()):
+            self._returning_sent = False
+            self._set_state('RETURN_HOME')
 
     def _step_return_home(self, now):
         if not getattr(self, '_returning_sent', False):

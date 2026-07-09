@@ -4,8 +4,11 @@ Lays a coverage_line_spacing x coverage_line_spacing grid over the mission
 boundary's bounding box, keeps only cells whose center is inside the
 boundary and outside every dead zone, then hands roughly-equal, contiguous
 left-to-right column bands of those cells to each drone -- as close to a
-plain 3-way split as cells allow. Bands are matched to drones by home-
-position x-order. Swappable baseline; a smarter decomposition algorithm
+plain 3-way split as cells allow. Bands are matched to drones by plain list
+order (the Nth drone gets the Nth region, left to right) -- there's no
+"home position" to match against, since each drone's actual home/spawn point
+is *derived from* its assigned band (see coverage_plan.plan_coverage), not
+the other way around. Swappable baseline; a smarter decomposition algorithm
 will replace this module later.
 """
 import math
@@ -45,15 +48,16 @@ def build_cells(boundary_points, dead_zone_point_lists, cell_size, dead_zone_mar
     return cells
 
 
-def assign_cells_to_drones(cells, drones):
-    """drones: list of dicts with 'id' and 'home_position' ([x, y, z]).
+def assign_cells_to_drones(cells, drone_ids):
+    """drone_ids: ordered list of drone id strings, e.g. ['cf1', 'cf2', 'cf3'].
 
-    Splits the set of occupied columns into len(drones) contiguous bands of
-    (nearly) equal column count, left to right, and matches each band to the
-    drone whose home x-coordinate sorts into the same left-to-right order.
-    Returns dict drone_id -> list of cell dicts.
+    Splits the set of occupied columns into len(drone_ids) contiguous bands
+    of (nearly) equal column count, left to right, and matches band i to
+    drone_ids[i] -- the 1st drone in the list gets the leftmost region, the
+    2nd gets the next one over, and so on. Returns dict drone_id -> list of
+    cell dicts.
     """
-    num_zones = len(drones)
+    num_zones = len(drone_ids)
     cols = sorted({c['col'] for c in cells})
     band_size = math.ceil(len(cols) / num_zones) if cols else 1
     col_band = {col: min(i // band_size, num_zones - 1) for i, col in enumerate(cols)}
@@ -62,5 +66,4 @@ def assign_cells_to_drones(cells, drones):
     for cell in cells:
         bands[col_band[cell['col']]].append(cell)
 
-    drones_by_x = sorted(drones, key=lambda d: d['home_position'][0])
-    return {d['id']: band for d, band in zip(drones_by_x, bands)}
+    return {drone_id: band for drone_id, band in zip(drone_ids, bands)}

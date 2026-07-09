@@ -51,6 +51,28 @@ function circlePoints(cx, cy, radius, segments) {
   return pts;
 }
 
+// setZones/setPaths used to rebuild hundreds of THREE.js meshes from scratch
+// on *every* poll (every 300ms) without ever disposing the old geometries/
+// materials -- an unbounded WebGL GPU-memory leak that eventually crashes the
+// browser tab. disposeObject3D()/clearGroup() must be used everywhere a
+// group's children get thrown away and rebuilt.
+function disposeObject3D(obj) {
+  const materials = Array.isArray(obj.material) ? obj.material : (obj.material ? [obj.material] : []);
+  materials.forEach((m) => {
+    if (m.map) m.map.dispose();
+    m.dispose();
+  });
+  if (obj.geometry) obj.geometry.dispose();
+}
+
+function clearGroup(group) {
+  while (group.children.length) {
+    const child = group.children[0];
+    disposeObject3D(child);
+    group.remove(child);
+  }
+}
+
 class GcsScene {
   constructor(container) {
     this.scene = new THREE.Scene();
@@ -75,7 +97,12 @@ class GcsScene {
 
     this.mapGroup = new THREE.Group(); this.scene.add(this.mapGroup);
     this.zoneGroup = new THREE.Group(); this.scene.add(this.zoneGroup);
-    this.pathGroup = new THREE.Group(); this.scene.add(this.pathGroup);
+    // Planned (gray dashed) path barely ever changes after the mission is
+    // planned, unlike the visited (white) tube which grows every leg -- kept
+    // as separate groups so the static one can be cache-skipped instead of
+    // rebuilding it from scratch on every single poll for no reason.
+    this.plannedPathGroup = new THREE.Group(); this.scene.add(this.plannedPathGroup);
+    this.visitedPathGroup = new THREE.Group(); this.scene.add(this.visitedPathGroup);
     this.markerPlaceholderGroup = new THREE.Group(); this.scene.add(this.markerPlaceholderGroup);
     this.markerGroup = new THREE.Group(); this.scene.add(this.markerGroup);
     this.droneGroup = new THREE.Group(); this.scene.add(this.droneGroup);
@@ -85,6 +112,8 @@ class GcsScene {
     this.tethers = {}; // dashed line from each drone's ground point up to its flying position
     this.markerMeshes = {};
     this.placeholderMeshes = {}; // sim-only "not found yet" ground-truth markers
+    this._lastZonesCacheKey = null;
+    this._lastPlannedPathsKey = null;
 
     window.addEventListener('resize', () => this.onResize(container));
   }
@@ -96,7 +125,7 @@ class GcsScene {
   }
 
   setMap(mapInfo) {
-    while (this.mapGroup.children.length) this.mapGroup.remove(this.mapGroup.children[0]);
+    clearGroup(this.mapGroup);
     const boundary = mapInfo.boundary || [];
     if (boundary.length >= 3) {
       this.mapGroup.add(lineLoopFromPoints(boundary, 0x44cc44, 0.006));
@@ -152,20 +181,66 @@ class GcsScene {
   // placeholder(0.012) < planned/visited path(0.02, see setPaths). Path used
   // to sit *below* the zone fill, which visually washed it out -- it needs to
   // be the topmost flat layer since it's the thing you actually want to read.
-  setZones(zones) {
-    while (this.zoneGroup.children.length) this.zoneGroup.remove(this.zoneGroup.children[0]);
+  // `visitedByDrone`: droneId -> Set of "x.xxx,y.xxx" cell-center keys that
+  // have actually been visited (see main()'s pollState, which derives this
+  // from `paths` + the authoritative `progress.waypoint_index` -- NOT a
+  // client-side nearest-point guess). Zone data essentially never changes
+  // after the mission is planned, but the visited set changes every leg, so
+  // the cache key covers both -- this used to rebuild every one of ~230
+  // little cell squares on *every single poll* (300ms) forever, which is
+  // what was slowly leaking WebGL memory until the tab crashed.
+  setZones(zones, visitedByDrone) {
+    visitedByDrone = visitedByDrone || {};
+    const cacheKey = JSON.stringify(zones) + '|' + JSON.stringify(
+      Object.fromEntries(Object.entries(visitedByDrone).map(([k, v]) => [k, Array.from(v).sort()])));
+    if (cacheKey === this._lastZonesCacheKey) return;
+    this._lastZonesCacheKey = cacheKey;
+
+    clearGroup(this.zoneGroup);
     zones.forEach((zone) => {
       const color = new THREE.Color(zone.color || '#cccccc');
+      const visited = visitedByDrone[zone.drone_id] || new Set();
       zone.polygons.forEach((pts) => {
         if (pts.length < 3) return;
+        // Square corners are [min,min],[max,min],[max,max],[min,max] (see
+        // control_node's _publish_plan) -- center is the midpoint of the
+        // two opposite corners.
+        const cx = (pts[0][0] + pts[2][0]) / 2;
+        const cy = (pts[0][1] + pts[2][1]) / 2;
+        const isVisited = visited.has(`${cx.toFixed(3)},${cy.toFixed(3)}`);
         const shape = polygonShape(pts);
         const geom = new THREE.ShapeGeometry(shape);
         geom.rotateX(Math.PI / 2);
         geom.translate(0, 0.004, 0);
         const mesh = new THREE.Mesh(
-          geom, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.16, side: THREE.DoubleSide }));
+          geom, new THREE.MeshBasicMaterial({
+            color, transparent: true, opacity: isVisited ? 0.55 : 0.14, side: THREE.DoubleSide }));
         this.zoneGroup.add(mesh);
       });
+    });
+  }
+
+  // Planned path barely ever changes after the mission is planned (published
+  // once, before flight), so it's cached and skipped when unchanged -- unlike
+  // the visited tube (see setVisitedPaths), rebuilding this every poll for no
+  // reason was a big chunk of the WebGL memory leak (see setZones).
+  // Drawn gray/dashed and projected onto the *ground* (z ~ 0) even though the
+  // drone actually flies it at cruise altitude, so the floor reads as a
+  // top-down coverage map; see setDrones for the altitude tether line.
+  setPlannedPaths(paths) {
+    const cacheKey = JSON.stringify(paths);
+    if (cacheKey === this._lastPlannedPathsKey) return;
+    this._lastPlannedPathsKey = cacheKey;
+
+    clearGroup(this.plannedPathGroup);
+    Object.values(paths).forEach((wps) => {
+      if (!wps || wps.length < 2) return;
+      const full = wps.map(([x, y]) => w2t(x, y, 0.02));
+      const geom = new THREE.BufferGeometry().setFromPoints(full);
+      const line = new THREE.Line(geom, new THREE.LineDashedMaterial({
+        color: 0x9aa0a6, dashSize: 0.15, gapSize: 0.1, opacity: 0.85, transparent: true }));
+      line.computeLineDistances();
+      this.plannedPathGroup.add(line);
     });
   }
 
@@ -177,25 +252,14 @@ class GcsScene {
   // on *different* rows can sit close to the current position without being
   // anywhere near "next", which is why cf2/cf3 showed as almost fully
   // "visited" right from the start of the mission.
-  // Planned/visited paths are drawn projected onto the *ground* (z ~ 0) even
-  // though the drone actually flies them at cruise altitude -- keeps the
-  // floor readable as a top-down coverage map. The drone mesh itself still
-  // renders at its real altitude (see setDrones), linked to its ground point
-  // by a dashed vertical line so the two pictures stay connected.
-  setPaths(paths, progress) {
-    while (this.pathGroup.children.length) this.pathGroup.remove(this.pathGroup.children[0]);
+  // This one genuinely needs a rebuild every poll (the tube grows as
+  // waypoint_index advances), but it's only ~3 small tube meshes -- cheap,
+  // and now properly disposed via clearGroup instead of leaking.
+  setVisitedPaths(paths, progress) {
+    clearGroup(this.visitedPathGroup);
     Object.entries(paths).forEach(([droneId, wps]) => {
       if (!wps || wps.length < 2) return;
-      const color = new THREE.Color(FALLBACK_COLORS[droneId] || '#cccccc');
       const visitedUpTo = (progress[droneId] && progress[droneId].waypoint_index) || 0;
-
-      // Topmost flat layer (see setZones) so it's never washed out under the
-      // zone-fill tint, plus higher opacity for contrast against the ground.
-      const full = wps.map(([x, y]) => w2t(x, y, 0.02));
-      const plannedGeom = new THREE.BufferGeometry().setFromPoints(full);
-      this.pathGroup.add(new THREE.Line(
-        plannedGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.15, gapSize: 0.1, opacity: 0.9, transparent: true })).computeLineDistances());
-
       const visitedPts = wps.slice(0, Math.min(wps.length, visitedUpTo + 1))
         .map(([x, y]) => w2t(x, y, 0.02));
       // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
@@ -207,12 +271,13 @@ class GcsScene {
       if (dedup.length >= 2) {
         // LineBasicMaterial's `linewidth` is ignored on most GPUs/browsers (a
         // long-standing WebGL/ANGLE limitation) so a "thicker visited path"
-        // has to actually be geometry, not a fatter line -- a thin tube mesh
-        // along the traveled points.
+        // has to actually be geometry, not a fatter line -- a thin white tube
+        // mesh along the traveled points.
         const curve = new THREE.CatmullRomCurve3(dedup, false, 'catmullrom', 0);
         const tubeGeom = new THREE.TubeGeometry(
           curve, Math.max(1, dedup.length * 4), 0.035, 6, false);
-        this.pathGroup.add(new THREE.Mesh(tubeGeom, new THREE.MeshBasicMaterial({ color })));
+        this.visitedPathGroup.add(
+          new THREE.Mesh(tubeGeom, new THREE.MeshBasicMaterial({ color: 0xffffff })));
       }
     });
   }
@@ -222,9 +287,7 @@ class GcsScene {
   // on real hardware (gcs_node never gets true_markers_path there), so this
   // is a no-op and nothing pre-known ever shows up -- exactly as it should be.
   setAllMarkers(allMarkers) {
-    while (this.markerPlaceholderGroup.children.length) {
-      this.markerPlaceholderGroup.remove(this.markerPlaceholderGroup.children[0]);
-    }
+    clearGroup(this.markerPlaceholderGroup);
     this.placeholderMeshes = {};
     allMarkers.forEach((m) => {
       const circle = lineLoopFromPoints(circlePoints(m.x, m.y, 0.14), 0x888888, 0.012);
@@ -258,6 +321,7 @@ class GcsScene {
     });
     Object.keys(this.markerMeshes).forEach((id) => {
       if (!seen.has(Number(id))) {
+        disposeObject3D(this.markerMeshes[id]);
         this.markerGroup.remove(this.markerMeshes[id]);
         delete this.markerMeshes[id];
       }
@@ -294,7 +358,14 @@ class GcsScene {
       // Dashed tether down to the ground point directly below the drone --
       // paths/visited cells are drawn on the ground (see setPaths), so this
       // keeps the actually-flying drone visually anchored to its cell.
-      if (this.tethers[d.id]) this.tetherGroup.remove(this.tethers[d.id]);
+      // Rebuilt every poll (position changes every time), so it must be
+      // disposed before replacing -- this and setZones/setPaths rebuilding
+      // without disposal is what was leaking WebGL memory until the tab
+      // crashed after a while.
+      if (this.tethers[d.id]) {
+        disposeObject3D(this.tethers[d.id]);
+        this.tetherGroup.remove(this.tethers[d.id]);
+      }
       const color = new THREE.Color(zoneColors[d.id] || FALLBACK_COLORS[d.id] || '#ffffff');
       const tetherGeom = new THREE.BufferGeometry().setFromPoints(
         [w2t(d.x, d.y, 0.02), w2t(d.x, d.y, d.z)]);
@@ -306,10 +377,12 @@ class GcsScene {
     });
     Object.keys(this.droneMeshes).forEach((id) => {
       if (!seen.has(id)) {
+        disposeObject3D(this.droneMeshes[id]);
         this.droneGroup.remove(this.droneMeshes[id]);
         delete this.droneMeshes[id];
       }
       if (!seen.has(id) && this.tethers[id]) {
+        disposeObject3D(this.tethers[id]);
         this.tetherGroup.remove(this.tethers[id]);
         delete this.tethers[id];
       }
@@ -406,9 +479,23 @@ function main() {
       });
       zoneColors = {};
       (state.zones || []).forEach((z) => { zoneColors[z.drone_id] = z.color; });
-      safeCall('setZones', () => gcsScene.setZones(state.zones || []));
+
+      // Which cell-center points has each drone actually reached, per the
+      // authoritative /mission/progress waypoint_index -- feeds setZones'
+      // "darken the cells actually visited" and is derived fresh every poll
+      // (cheap: just string keys, no THREE.js objects involved).
+      const visitedByDrone = {};
+      Object.entries(state.paths || {}).forEach(([droneId, wps]) => {
+        const idx = (state.progress && state.progress[droneId] && state.progress[droneId].waypoint_index) || 0;
+        const set = new Set();
+        wps.slice(0, Math.min(wps.length, idx + 1)).forEach(([x, y]) => set.add(`${x.toFixed(3)},${y.toFixed(3)}`));
+        visitedByDrone[droneId] = set;
+      });
+
+      safeCall('setZones', () => gcsScene.setZones(state.zones || [], visitedByDrone));
       safeCall('buildLegend', () => buildLegend(state.zones || []));
-      safeCall('setPaths', () => gcsScene.setPaths(state.paths || {}, state.progress || {}));
+      safeCall('setPlannedPaths', () => gcsScene.setPlannedPaths(state.paths || {}));
+      safeCall('setVisitedPaths', () => gcsScene.setVisitedPaths(state.paths || {}, state.progress || {}));
       safeCall('setMarkers', () => gcsScene.setMarkers(state.markers || []));
       safeCall('setDrones', () => gcsScene.setDrones(state.drones || [], zoneColors));
       safeCall('marker-status', () => {

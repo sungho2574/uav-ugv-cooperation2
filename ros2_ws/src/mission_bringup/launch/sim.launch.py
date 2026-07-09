@@ -20,20 +20,47 @@ from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
+from mission_control.coverage_plan import plan_coverage
+from mission_control.zone_split import assign_cells_to_drones, build_cells
 
-def _generate_crazyflies_yaml(mission_map, base_crazyflies_path):
-    """Overwrite each robot's initial_position with mission_map.yaml's
-    home_position, so the single source of truth for "where does this drone
-    start" is the mission map -- the drone's coverage path starts exactly at
-    its own home_position (see coverage_plan.py), and takeoff only rises
-    straight up, so the spawn point and the path's start point must always
-    match or the drone would need to "commute" sideways after taking off.
+# Must match control_node's `dead_zone_margin` parameter default -- both sides
+# run the exact same build_cells()/assign_cells_to_drones()/plan_coverage()
+# computation independently (rather than passing data between the launch
+# script and the node) so they always agree on where each drone's zone (and
+# therefore its home/spawn point) actually is.
+DEAD_ZONE_MARGIN = 0.15
+
+
+def _compute_homes(mission_map):
+    """Each drone's home/spawn point is the first cell of its own assigned
+    zone (see coverage_plan.py) -- e.g. the drone assigned the 3rd region
+    spawns inside the 3rd region, not at some unrelated point that then
+    needs a long straight commute to reach its own zone."""
+    boundary = [tuple(p) for p in mission_map['boundary']]
+    dead_zones = [[tuple(p) for p in dz['points']] for dz in mission_map.get('dead_zones', [])]
+    drone_ids = [d['id'] for d in mission_map['drones']]
+    cells = build_cells(
+        boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
+    zone_cells = assign_cells_to_drones(cells, drone_ids)
+    homes = {}
+    for drone_id in drone_ids:
+        waypoints = plan_coverage(zone_cells[drone_id])
+        homes[drone_id] = waypoints[0] if waypoints else (0.0, 0.0)
+    return homes
+
+
+def _generate_crazyflies_yaml(homes, base_crazyflies_path):
+    """Overwrite each robot's initial_position with its computed home point,
+    so the single source of truth for "where does this drone start" is the
+    same zone/path computation control_node itself uses -- takeoff only
+    rises straight up, so the spawn point and the path's start point must
+    always match or the drone would need to "commute" sideways afterward.
     """
     with open(base_crazyflies_path, 'r') as f:
         crazyflies_cfg = yaml.safe_load(f)
-    for d in mission_map['drones']:
-        if d['id'] in crazyflies_cfg.get('robots', {}):
-            crazyflies_cfg['robots'][d['id']]['initial_position'] = list(d['home_position'])
+    for drone_id, (x, y) in homes.items():
+        if drone_id in crazyflies_cfg.get('robots', {}):
+            crazyflies_cfg['robots'][drone_id]['initial_position'] = [x, y, 0.0]
 
     fd, generated_path = tempfile.mkstemp(prefix='crazyflies_generated_', suffix='.yaml')
     with os.fdopen(fd, 'w') as f:
@@ -49,7 +76,8 @@ def _build(context, *args, **kwargs):
 
     with open(mission_map_path, 'r') as f:
         mission_map = yaml.safe_load(f)
-    generated_crazyflies_path = _generate_crazyflies_yaml(mission_map, base_crazyflies_path)
+    homes = _compute_homes(mission_map)
+    generated_crazyflies_path = _generate_crazyflies_yaml(homes, base_crazyflies_path)
     drone_ids = [d['id'] for d in mission_map['drones']]
 
     crazyswarm2_launch = IncludeLaunchDescription(

@@ -154,8 +154,12 @@ class ControlNode(Node):
         self.coverage_line_spacing = float(self.mission_map['coverage_line_spacing'])
 
         self.drones = {}
+        # home_position here is just a startup placeholder -- _do_plan() below
+        # overwrites it with the actual first cell of whatever zone this drone
+        # ends up assigned, once that's known (see coverage_plan.plan_coverage).
         for d in self.mission_map['drones']:
-            handle = DroneHandle(self, d['id'], d['home_position'], d.get('home_yaw', 0.0))
+            placeholder_home = d.get('home_position', [0.0, 0.0, 0.0])
+            handle = DroneHandle(self, d['id'], placeholder_home, d.get('home_yaw', 0.0))
             handle.wait_for_services(self, timeout_sec=5.0)
             self.drones[d['id']] = handle
 
@@ -263,15 +267,23 @@ class ControlNode(Node):
         dead_zones = [
             [tuple(p) for p in dz['points']] for dz in self.mission_map.get('dead_zones', [])
         ]
+        drone_ids = [d['id'] for d in self.mission_map['drones']]
         cells = build_cells(
             boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
-        self.zone_cells = assign_cells_to_drones(cells, self.mission_map['drones'])
+        self.zone_cells = assign_cells_to_drones(cells, drone_ids)
 
     def _do_plan(self):
+        # Home is *derived from* the assigned zone (its first cell), not the
+        # other way around -- a drone assigned to the 3rd region should spawn
+        # inside the 3rd region, not at some unrelated pre-given point that
+        # then needs a long straight commute to reach its own zone.
         for drone_id, handle in self.drones.items():
             cells = self.zone_cells[drone_id]
-            start_xy = (handle.home_position[0], handle.home_position[1])
-            handle.waypoints = plan_coverage(cells, start_xy)
+            handle.waypoints = plan_coverage(cells)
+            if handle.waypoints:
+                home_xy = handle.waypoints[0]
+                handle.home_position = (home_xy[0], home_xy[1], 0.0)
+                handle.last_target_xy = home_xy
             handle.arrived_index = 0
             handle.pending_index = 0
             handle.done = len(handle.waypoints) <= 1  # index 0 is home itself, nothing to fly

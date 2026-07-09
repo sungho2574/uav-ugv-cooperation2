@@ -14,10 +14,11 @@ here. Also NOTE: wifi_ips below are placeholders -- set them to each AI-deck's
 actual WiFi AP IP address, and calibrate cf_perception/config/camera_intrinsics.yaml
 before trusting marker detections.
 
-IMPORTANT: `initial_position` is auto-generated from mission_map.yaml's
-home_position for each drone (see _generate_crazyflies_yaml below), but on
-real hardware YOU still have to physically place each Crazyflie at that exact
-spot before launch -- unlike sim, nothing here moves the physical drone there.
+IMPORTANT: `initial_position` is auto-computed as the first cell of each
+drone's own assigned zone (same computation control_node itself runs -- see
+_compute_homes below), but on real hardware YOU still have to physically
+place each Crazyflie at that exact spot before launch -- unlike sim, nothing
+here moves the physical drone there.
 """
 import os
 import tempfile
@@ -29,14 +30,36 @@ from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
+from mission_control.coverage_plan import plan_coverage
+from mission_control.zone_split import assign_cells_to_drones, build_cells
 
-def _generate_crazyflies_yaml(mission_map, base_crazyflies_path):
+# Must match control_node's `dead_zone_margin` parameter default -- see
+# sim.launch.py's _compute_homes for why both sides compute independently.
+DEAD_ZONE_MARGIN = 0.15
+
+
+def _compute_homes(mission_map):
+    """Same computation as sim.launch.py -- see there for why."""
+    boundary = [tuple(p) for p in mission_map['boundary']]
+    dead_zones = [[tuple(p) for p in dz['points']] for dz in mission_map.get('dead_zones', [])]
+    drone_ids = [d['id'] for d in mission_map['drones']]
+    cells = build_cells(
+        boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
+    zone_cells = assign_cells_to_drones(cells, drone_ids)
+    homes = {}
+    for drone_id in drone_ids:
+        waypoints = plan_coverage(zone_cells[drone_id])
+        homes[drone_id] = waypoints[0] if waypoints else (0.0, 0.0)
+    return homes
+
+
+def _generate_crazyflies_yaml(homes, base_crazyflies_path):
     """Same injection as sim.launch.py -- see there for why."""
     with open(base_crazyflies_path, 'r') as f:
         crazyflies_cfg = yaml.safe_load(f)
-    for d in mission_map['drones']:
-        if d['id'] in crazyflies_cfg.get('robots', {}):
-            crazyflies_cfg['robots'][d['id']]['initial_position'] = list(d['home_position'])
+    for drone_id, (x, y) in homes.items():
+        if drone_id in crazyflies_cfg.get('robots', {}):
+            crazyflies_cfg['robots'][drone_id]['initial_position'] = [x, y, 0.0]
 
     fd, generated_path = tempfile.mkstemp(prefix='crazyflies_generated_', suffix='.yaml')
     with os.fdopen(fd, 'w') as f:
@@ -54,7 +77,8 @@ def _build(context, *args, **kwargs):
 
     with open(mission_map_path, 'r') as f:
         mission_map = yaml.safe_load(f)
-    generated_crazyflies_path = _generate_crazyflies_yaml(mission_map, base_crazyflies_path)
+    homes = _compute_homes(mission_map)
+    generated_crazyflies_path = _generate_crazyflies_yaml(homes, base_crazyflies_path)
     drone_ids = [d['id'] for d in mission_map['drones']]
     # TODO: replace with each AI-deck's actual WiFi AP IP address.
     wifi_ips = ['192.168.4.1', '192.168.4.2', '192.168.4.3']

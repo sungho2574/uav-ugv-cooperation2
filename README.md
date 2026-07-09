@@ -39,6 +39,7 @@ uav-ugv-cooperation2/
         │       ├── MarkerDetection.msg
         │       ├── ZoneAssignment.msg / ZoneAssignmentArray.msg
         │       ├── CoveragePath.msg / CoveragePathArray.msg
+        │       ├── DroneProgress.msg / DroneProgressArray.msg
         │       └── MarkerRecord.msg / MarkerRecordArray.msg
         │
         ├── mission_control/          # 중앙 상태머신 (ament_python)
@@ -117,10 +118,10 @@ flowchart TD
 | 노드                             | Subscribe                                                                                                      | Publish                                                                           | 비고                                                                                            |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `crazyflie_server` (crazyswarm2) | -                                                                                                              | `/cfN/pose` (x3)                                                                  | sim/real 백엔드 모두 동일 토픽                                                                  |
-| `control_node`                   | `/detections`                                                                                                  | `/mission/zones`, `/mission/coverage_paths`, `/mission/state`, `/mission/markers` | `/cfN/takeoff`,`/cfN/land`,`/cfN/go_to` 서비스 **클라이언트**, `/mission/start` 서비스 **서버** |
+| `control_node`                   | `/detections`, `/states`(실측 위치 피드백)                                                                     | `/mission/zones`, `/mission/coverage_paths`, `/mission/progress`, `/mission/state`, `/mission/markers` | `/cfN/takeoff`,`/cfN/land`,`/cfN/go_to` 서비스 **클라이언트**, `/mission/start` 서비스 **서버** |
 | `sim_perception_node`            | `/tf` (tf2 조회, `world→cfN`)                                                                                   | `/states`, `/detections`                                                          | sim 백엔드는 `/cfN/pose`를 발행하지 않아 tf2로 위치를 얻음. `true_markers.yaml`(ground-truth)은 이 노드만 읽음 |
 | `real_perception_node`           | `/cfN/pose` (x3)                                                                                               | `/states`, `/detections`, `/cfN/image_raw` (x3)                                   | AI-deck WiFi 소켓에서 직접 영상 수신(토픽 아님)                                                 |
-| `gcs_node`                       | `/states`, `/detections`, `/mission/zones`, `/mission/coverage_paths`, `/mission/state`, `/cfN/image_raw` (x3) | -                                                                                 | `/mission/start` 서비스 **클라이언트** (REST `/api/mission/start`로 트리거)                     |
+| `gcs_node`                       | `/states`, `/detections`, `/mission/zones`, `/mission/coverage_paths`, `/mission/progress`, `/mission/state`, `/cfN/image_raw` (x3) | -                                                                                 | `/mission/start` 서비스 **클라이언트** (REST `/api/mission/start`로 트리거)                     |
 
 ### 3.2 노드별 역할
 
@@ -144,6 +145,8 @@ flowchart TD
 | `ZoneAssignmentArray` | `ZoneAssignment[] zones`                                                              | `/mission/zones`          | Reliable, **Transient Local**(latched) |
 | `CoveragePath`        | `string drone_id`, `nav_msgs/Path path`                                               | (배열로 래핑)             | -                                      |
 | `CoveragePathArray`   | `CoveragePath[] paths`                                                                | `/mission/coverage_paths` | Reliable, **Transient Local**(latched) |
+| `DroneProgress`       | `string drone_id`, `int32 waypoint_index`, `int32 total_waypoints`                    | (배열로 래핑)             | -                                      |
+| `DroneProgressArray`  | `DroneProgress[] progress`                                                            | `/mission/progress`       | Reliable, volatile                     |
 | `MarkerRecord`        | `int32 marker_id`, `geometry_msgs/Point position`                                     | (배열로 래핑)             | -                                      |
 | `MarkerRecordArray`   | `MarkerRecord[] markers`                                                              | `/mission/markers`        | Reliable, **Transient Local**(latched) |
 
@@ -226,7 +229,9 @@ stateDiagram-v2
   - 주요 파라미터: `mission_map_path`(필수), `cruise_speed`(기본 0.3 m/s), `min_leg_duration`(1.5s), `leg_settle_margin`(0.5s), `takeoff_duration`(2.0s), `takeoff_settle_time`(2.5s), `land_duration`(2.5s), `land_settle_time`(3.0s), `start_immediately`(false — GCS 버튼 없이 즉시 시작하고 싶을 때 true), `dead_zone_margin`(0.15m — 아래 `zone_split.py` 설명 참고).
   - **구간(leg) 소요시간 계산은 실측 위치 기반**: 다음 waypoint까지의 `go_to` `duration`(=거리/`cruise_speed`, 최소 `min_leg_duration`)을 계산할 때 "마지막으로 보낸 목표에 이미 도착했다"고 가정하지 않고, `/states`를 구독해 실제 측정 위치(`live_xy`)에서부터의 거리로 계산한다. sim/real 타이밍이 우리 wall-clock 가정과 어긋나 실제 위치가 뒤처져 있는데도 그 사실을 모른 채 다음 구간을 계산하면, 남은 실제 거리에 비해 `duration`이 지나치게 짧게 잡혀 crazyswarm2의 `go_to`가 불가능한 가속도를 요구하며 불안정해질 수 있다(공식 문서에도 명시된 위험) — 이를 피하기 위한 장치.
 - **`zone_split.py`**: `build_free_space()`가 `boundary`+`dead_zones`로 free-space 폴리곤을 만드는데, 이때 `dead_zone_margin`만큼 각 dead-zone을 부풀린 뒤 빼서(`difference`) 커버리지 경로가 dead-zone 경계에 완전히 붙어버리는 일(스윕 라인 간격이 우연히 dead-zone 좌표와 일치하는 경우 생길 수 있음)을 막는다. `assign_zones_to_drones()`가 x축 기준 등폭 세로 스트립으로 나눈 뒤 드론 홈 위치의 x좌표 순서와 매칭한다. Dead-zone에 걸리면 zone이 `MultiPolygon`이 될 수 있으며 그대로 허용한다.
-- **`coverage_plan.py`**: `plan_coverage()`가 zone의 하위 폴리곤들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤, 각 폴리곤에 `coverage_line_spacing` 간격 수평 스캔라인을 긋고 좌우 번갈아(lawnmower) 연결한 waypoint 리스트를 반환한다. 한 스캔라인이 dead-zone에 걸려 좌/우 두 구간으로 쪼개지면, 그 둘을 직선으로 바로 잇지 않고(=dead-zone 상공을 가로지르게 됨) zone 폴리곤의 위/아래 가장자리(dead-zone이 닿지 않는, 항상 안전한 경계)로 우회한다.
+- **`coverage_plan.py`**: 임무 단위는 **`coverage_line_spacing` x `coverage_line_spacing` grid cell**이고, waypoint는 그 셀의 **중심점**이다 — zone 경계선을 따라가는 게 아니라 zone에 속하는 모든 셀의 중심을 lawnmower(가로줄 왕복) 순서로 방문한다. 셀 그리드는 zone의 bounding box 원점에 정렬해서, 여러 조각으로 나뉜 zone도 셀 경계가 서로 어긋나지 않는다(`_sweep_cells()`).
+  - dead-zone이 있는 zone은 먼저 `_split_out_holes()`가 (zone_split.py와 같은 세로-스트립 방식으로) hole 없는 조각 여러 개로 **한 번에** 잘라낸다 — 초기 버전은 dead-zone에 걸리는 매 스캔라인마다 그 자리에서 우회를 계산했는데, dead-zone 높이만큼 여러 줄이 걸리면 그 줄들 각각이 zone 맨 위/아래까지 왕복하는 거대한 우회를 반복해서 "위로 한참 올라갔다 뚝 떨어지는" 비행이 나왔다. 조각을 한 번만 잘라두면 각 조각은 그냥 단순 lawnmower로 셀 중심을 스윕하면 되고 줄 단위 특수 처리가 필요 없다.
+  - `plan_coverage()`는 이 조각들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤 각 조각을 스윕하는데, 조각 사이 이동 구간이 (같은 dead-zone을 사이에 둔 "위쪽 조각"→"아래쪽 조각"처럼) 직선으로 가로지르게 되는 경우엔 zone 바깥 경계(상/하/좌/우, dead-zone은 항상 내부에만 있으므로 경계는 항상 안전) 중 가장 짧게 검증되는 우회로 대체한다(`_safe_transit()`).
 - 두 모듈 모두 rclpy에 의존하지 않는 순수 함수라 독립적으로 단위 테스트 가능하다 (예제 지도로 free-space 면적==zone 면적 합, 모든 waypoint가 자기 zone 내부에 있음을 확인 완료).
 
 ## 7. `cf_perception` 패키지 상세
@@ -262,7 +267,7 @@ stateDiagram-v2
   - **`true_markers_path`/`/api/all_markers`는 sim 전용 디버그 오버레이**다. `sim.launch.py`만 이 파라미터를 넘기고(`true_markers.yaml` 재사용), `real.launch.py`는 넘기지 않는다 — 그래서 실기체에서는 이 리스트가 항상 빈 배열이라 "찾기 전" 마커가 아예 표시되지 않는다(실제로 모르는 게 맞으니까). control_node는 이 값을 절대 보지 않으므로 미션 로직 자체가 정답을 참고하는 일은 없다.
 - **프론트엔드**(`templates/index.html` + `static/app.js`): Three.js(r128, 로컬 vendoring, 인터넷 불필요) + OrbitControls로 3D 씬 구성.
   - 화면 오른쪽: 드론별 영상 3개(폴링 방식 `<img>`, 실기체 전용 — 시뮬은 "no signal" 표시).
-  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 커버리지 경로(점선), **방문한 구간은 실선으로 굵게**(클라이언트에서 드론 현재 위치와 가장 가까운 경로 인덱스를 찾아 그 이전 구간을 "방문"으로 렌더링 — 별도 피드백 토픽 불필요), 드론(구+RGB 3축, yaw 회전).
+  - 화면 왼쪽: 3D 씬 — 바닥에 boundary(초록 외곽선)와 지형, dead-zone(빨강 반투명), zone별 색칠(드론별 고정 팔레트 `cf1=빨강/cf2=파랑/cf3=초록`), 커버리지 경로(점선), **방문한 구간은 두꺼운 튜브 메시로 표시**(`/mission/progress`로 받은 `waypoint_index`까지를 그대로 그림 — 클라이언트가 위치로 추측하지 않음. three.js `LineBasicMaterial`의 `linewidth`는 대부분의 브라우저/GPU에서 무시되는 문제가 있어 `TubeGeometry`로 그림), 드론(구+RGB 3축, yaw 회전).
   - **마커 표시**: (sim only) 아직 못 찾은 ground-truth 마커는 회색 원 테두리+흐린 ID 라벨로 위치만 표시, `/detections`로 실제 검출되면 그 자리의 회색 표시가 사라지고 밝은 노란 구+ID 라벨로 바뀐다 — "찾기 전/후"가 시각적으로 뚜렷이 구분됨.
   - 상단 HUD: 현재 미션 phase 텍스트(`/mission/state` 그대로 표시) + Start 버튼(미션 시작 후 자동 비활성화, 버튼 텍스트가 현재 phase로 바뀜).
   - 우측 하단 패널: 발견한 마커 개수(`found/total`, 실기체처럼 total을 모르면 `found`만) + 발견한 마커 ID 목록.

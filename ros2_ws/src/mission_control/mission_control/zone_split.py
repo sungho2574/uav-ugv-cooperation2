@@ -25,7 +25,13 @@ def build_free_space(boundary_points, dead_zone_point_lists, dead_zone_margin=0.
     for dz_points in dead_zone_point_lists:
         hole = Polygon(dz_points)
         if dead_zone_margin > 0:
-            hole = hole.buffer(dead_zone_margin)
+            # join_style=2 (mitre) keeps corners sharp instead of rounding them off.
+            # coverage_plan.py's hole-splitting cuts strips at this hole's exact
+            # bounding-box x-extent and relies on the hole spanning that whole
+            # strip's width -- a *rounded* buffer tapers to zero width right at
+            # the bbox edges, which left a thin sliver still connecting top and
+            # bottom of the "split" strip (i.e. it silently failed to split).
+            hole = hole.buffer(dead_zone_margin, join_style=2)
         free = free.difference(hole)
     return free
 

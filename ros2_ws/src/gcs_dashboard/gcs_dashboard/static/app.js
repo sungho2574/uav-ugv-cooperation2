@@ -5,12 +5,6 @@
 
 const FALLBACK_COLORS = { cf1: '#ff5555', cf2: '#55aaff', cf3: '#55dd77' };
 
-// "visited path" tracking only makes sense once a drone is actually following
-// its coverage path -- before COVERING (still on the ground / awaiting the
-// Start button) the drone's position is its home position, which can happen
-// to sit near the *middle* of a zig-zag path and falsely look "visited".
-const FLYING_STATES = new Set(['COVERING', 'RETURN_HOME', 'LAND', 'PUBLISH_MARKERS', 'DONE']);
-
 function w2t(x, y, z) {
   return new THREE.Vector3(x, z || 0, y);
 }
@@ -89,7 +83,6 @@ class GcsScene {
     this.droneMeshes = {};
     this.markerMeshes = {};
     this.placeholderMeshes = {}; // sim-only "not found yet" ground-truth markers
-    this.visitedHighWaterMark = {}; // droneId -> last known "flown up to" waypoint index
 
     window.addEventListener('resize', () => this.onResize(container));
   }
@@ -153,39 +146,43 @@ class GcsScene {
     });
   }
 
-  setPaths(paths, drones, zoneColors, missionState) {
+  // `progress` is the authoritative per-drone {waypoint_index, total_waypoints}
+  // published by control_node itself (the thing actually driving the FSM), not
+  // a client-side guess. An earlier version guessed "how far along" a drone
+  // was by finding whichever waypoint was spatially nearest to its current
+  // position -- unreliable on a zig-zag lawnmower path, where many waypoints
+  // on *different* rows can sit close to the current position without being
+  // anywhere near "next", which is why cf2/cf3 showed as almost fully
+  // "visited" right from the start of the mission.
+  setPaths(paths, progress) {
     while (this.pathGroup.children.length) this.pathGroup.remove(this.pathGroup.children[0]);
-    if (!FLYING_STATES.has(missionState)) {
-      // Not flying yet -- reset progress so a new mission run starts clean.
-      this.visitedHighWaterMark = {};
-    }
     Object.entries(paths).forEach(([droneId, wps]) => {
       if (!wps || wps.length < 2) return;
-      const color = new THREE.Color(zoneColors[droneId] || FALLBACK_COLORS[droneId] || '#cccccc');
-      const drone = drones.find((d) => d.id === droneId);
-      let visitedUpTo = this.visitedHighWaterMark[droneId] || 0;
-      if (drone && FLYING_STATES.has(missionState)) {
-        let bestDist = Infinity;
-        let nearestIdx = 0;
-        wps.forEach((wp, idx) => {
-          const d = Math.hypot(wp[0] - drone.x, wp[1] - drone.y);
-          if (d < bestDist) { bestDist = d; nearestIdx = idx; }
-        });
-        // Monotonic: never let the "visited" marker jump backwards, since the
-        // zig-zag path can pass close to earlier legs again later on.
-        visitedUpTo = Math.max(visitedUpTo, nearestIdx);
-        this.visitedHighWaterMark[droneId] = visitedUpTo;
-      }
+      const color = new THREE.Color(FALLBACK_COLORS[droneId] || '#cccccc');
+      const visitedUpTo = (progress[droneId] && progress[droneId].waypoint_index) || 0;
+
       const full = wps.map(([x, y, z]) => w2t(x, y, z));
       const plannedGeom = new THREE.BufferGeometry().setFromPoints(full);
       this.pathGroup.add(new THREE.Line(
         plannedGeom, new THREE.LineDashedMaterial({ color, dashSize: 0.15, gapSize: 0.1, opacity: 0.5, transparent: true })).computeLineDistances());
 
-      const visited = wps.slice(0, visitedUpTo + 1).map(([x, y, z]) => w2t(x, y, z));
-      if (visited.length >= 2) {
-        const visitedGeom = new THREE.BufferGeometry().setFromPoints(visited);
-        const visitedLine = new THREE.Line(visitedGeom, new THREE.LineBasicMaterial({ color, linewidth: 3 }));
-        this.pathGroup.add(visitedLine);
+      const visitedPts = wps.slice(0, Math.min(wps.length, visitedUpTo + 1))
+        .map(([x, y, z]) => w2t(x, y, z));
+      // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
+      // zero-length segment (NaN tangents) which would make the tube vanish.
+      const dedup = [];
+      visitedPts.forEach((p) => {
+        if (!dedup.length || p.distanceTo(dedup[dedup.length - 1]) > 1e-6) dedup.push(p);
+      });
+      if (dedup.length >= 2) {
+        // LineBasicMaterial's `linewidth` is ignored on most GPUs/browsers (a
+        // long-standing WebGL/ANGLE limitation) so a "thicker visited path"
+        // has to actually be geometry, not a fatter line -- a thin tube mesh
+        // along the traveled points.
+        const curve = new THREE.CatmullRomCurve3(dedup, false, 'catmullrom', 0);
+        const tubeGeom = new THREE.TubeGeometry(
+          curve, Math.max(1, dedup.length * 4), 0.035, 6, false);
+        this.pathGroup.add(new THREE.Mesh(tubeGeom, new THREE.MeshBasicMaterial({ color })));
       }
     });
   }
@@ -354,8 +351,7 @@ function main() {
       (state.zones || []).forEach((z) => { zoneColors[z.drone_id] = z.color; });
       safeCall('setZones', () => gcsScene.setZones(state.zones || []));
       safeCall('buildLegend', () => buildLegend(state.zones || []));
-      safeCall('setPaths', () => gcsScene.setPaths(
-        state.paths || {}, state.drones || [], zoneColors, state.mission_state));
+      safeCall('setPaths', () => gcsScene.setPaths(state.paths || {}, state.progress || {}));
       safeCall('setMarkers', () => gcsScene.setMarkers(state.markers || []));
       safeCall('setDrones', () => gcsScene.setDrones(state.drones || [], zoneColors));
       safeCall('marker-status', () => {

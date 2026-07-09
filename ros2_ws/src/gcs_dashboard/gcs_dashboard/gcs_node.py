@@ -22,7 +22,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
 from mission_interfaces.msg import (
-    CoveragePathArray, DroneState, MarkerDetection, ZoneAssignmentArray)
+    CoveragePathArray, DroneProgressArray, DroneState, MarkerDetection, ZoneAssignmentArray)
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -45,6 +45,7 @@ class SharedState:
         self.markers = {}   # marker_id -> {x, y, z}
         self.zones = []     # [{drone_id, color, polygons: [[[x, y], ...]]}]
         self.paths = {}     # drone_id -> [[x, y, z], ...]
+        self.progress = {}  # drone_id -> {waypoint_index, total_waypoints}
         self.mission_state = 'UNKNOWN'
         self.frames = {}    # drone_id -> jpeg bytes
 
@@ -63,6 +64,10 @@ class SharedState:
     def set_paths(self, paths):
         with self._lock:
             self.paths = paths
+
+    def set_progress(self, progress):
+        with self._lock:
+            self.progress = progress
 
     def set_mission_state(self, text):
         with self._lock:
@@ -83,6 +88,7 @@ class SharedState:
                 'markers': [{'id': mid, **m} for mid, m in self.markers.items()],
                 'zones': list(self.zones),
                 'paths': dict(self.paths),
+                'progress': dict(self.progress),
                 'mission_state': self.mission_state,
             }
 
@@ -109,6 +115,7 @@ class GcsNode(Node):
             ZoneAssignmentArray, '/mission/zones', self._on_zones, LATCHED_QOS)
         self.create_subscription(
             CoveragePathArray, '/mission/coverage_paths', self._on_paths, LATCHED_QOS)
+        self.create_subscription(DroneProgressArray, '/mission/progress', self._on_progress, 10)
         self.create_subscription(String, '/mission/state', self._on_mission_state, 10)
 
         for drone_id in self.drone_ids:
@@ -175,6 +182,13 @@ class GcsNode(Node):
                 for pose in cp.path.poses
             ]
         self.shared.set_paths(paths)
+
+    def _on_progress(self, msg: DroneProgressArray):
+        progress = {
+            p.drone_id: {'waypoint_index': p.waypoint_index, 'total_waypoints': p.total_waypoints}
+            for p in msg.progress
+        }
+        self.shared.set_progress(progress)
 
     def _on_mission_state(self, msg: String):
         self.shared.set_mission_state(msg.data)

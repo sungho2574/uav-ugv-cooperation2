@@ -1,0 +1,3 @@
+string drone_id
+int32 waypoint_index
+int32 total_waypoints

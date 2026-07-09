@@ -9,6 +9,8 @@ find_package(nav_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DroneState.msg"
+  "msg/DroneProgress.msg"
+  "msg/DroneProgressArray.msg"
   "msg/MarkerDetection.msg"
   "msg/ZoneAssignment.msg"
   "msg/ZoneAssignmentArray.msg"

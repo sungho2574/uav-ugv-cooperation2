@@ -28,8 +28,8 @@ from geometry_msgs.msg import Point, Point32
 from geometry_msgs.msg import Polygon as PolygonMsg
 from geometry_msgs.msg import PoseStamped
 from mission_interfaces.msg import (
-    CoveragePath, CoveragePathArray, DroneState, MarkerDetection, MarkerRecord,
-    MarkerRecordArray, ZoneAssignment, ZoneAssignmentArray,
+    CoveragePath, CoveragePathArray, DroneProgress, DroneProgressArray, DroneState,
+    MarkerDetection, MarkerRecord, MarkerRecordArray, ZoneAssignment, ZoneAssignmentArray,
 )
 from nav_msgs.msg import Path
 from std_msgs.msg import String
@@ -158,6 +158,12 @@ class ControlNode(Node):
         self.markers_pub = self.create_publisher(
             MarkerRecordArray, '/mission/markers', LATCHED_QOS)
         self.state_pub = self.create_publisher(String, '/mission/state', 10)
+        # Authoritative "how far along its path is each drone" feed for the GCS --
+        # this used to be *guessed* client-side from nearest-waypoint distance,
+        # which is unreliable on a zig-zag path (many waypoints can be spatially
+        # close to the current position without actually being "next"). control_node
+        # already tracks the real wp_index itself, so it's simplest to just publish it.
+        self.progress_pub = self.create_publisher(DroneProgressArray, '/mission/progress', 10)
 
         self.detections_sub = self.create_subscription(
             MarkerDetection, '/detections', self._on_detection, 10)
@@ -294,6 +300,7 @@ class ControlNode(Node):
             path_array.paths.append(cp)
         self.paths_pub.publish(path_array)
         self.get_logger().info('published zone assignment and coverage paths')
+        self._publish_progress()  # 0/total for every drone, before flight even starts
 
     def _step_takeoff(self, now):
         if not self._takeoff_sent:
@@ -332,11 +339,23 @@ class ControlNode(Node):
             max_duration = max(max_duration, duration)
             any_active = True
 
+        self._publish_progress()
+
         if not any_active:
             self._returning_sent = False
             self._set_state('RETURN_HOME')
             return
         self._leg_deadline = now + max_duration + self.leg_settle_margin
+
+    def _publish_progress(self):
+        array = DroneProgressArray()
+        for handle in self.drones.values():
+            array.progress.append(DroneProgress(
+                drone_id=handle.drone_id,
+                waypoint_index=handle.wp_index,
+                total_waypoints=len(handle.waypoints),
+            ))
+        self.progress_pub.publish(array)
 
     def _step_covering(self, now):
         if now >= self._leg_deadline:

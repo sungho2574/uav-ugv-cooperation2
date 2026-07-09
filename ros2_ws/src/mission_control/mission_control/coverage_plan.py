@@ -1,21 +1,80 @@
-"""Naive coverage path baseline: boustrophedon (lawnmower) sweep.
+"""Naive coverage path baseline: grid-cell boustrophedon (lawnmower) sweep.
 
-For each sub-polygon of a (possibly multi-part) zone, sweeps horizontal scan
-lines spaced `line_spacing` apart, alternating direction each line. Sub-polygons
-and lines are visited in simple nearest-next order starting from the drone's
-home position -- no attempt at optimizing total travel distance. Swappable
-baseline; a smarter planner will replace this module later.
+The mission is to visit every `line_spacing` x `line_spacing` cell inside a
+zone -- a waypoint is a *cell center*, not a point on the zone's boundary.
+Cells are laid out on a grid anchored to the zone's own bounding-box origin,
+swept row by row (alternating direction each row, lawnmower-style). Rows and
+sub-polygons are visited in simple nearest-next order starting from the
+drone's home position -- no attempt at optimizing total travel distance.
+Swappable baseline; a smarter planner will replace this module later.
+
+Any dead-zone hole is cut out of the zone *once*, up front (same vertical-strip
+technique zone_split.py uses to split zones among drones), turning a
+polygon-with-a-hole into a handful of simple, hole-free pieces before sweeping.
+An earlier version instead tried to route around a hole separately on every
+single scan row that crossed it -- for a hole a few rows tall that meant every
+one of those rows detouring all the way to the zone's far top/bottom edge and
+back, which is what produced the "climbs way up, drops back down" flight
+pattern. Splitting once avoids that entirely: each piece gets its own plain
+lawnmower sweep with no per-row special-casing at all.
 """
-from shapely.geometry import LineString, MultiPolygon, Point
+import math
+
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
+
+
+def _split_out_holes(poly):
+    """Return a list of hole-free polygons whose union is `poly`.
+
+    Slices `poly` into vertical strips at the x-extent of each interior hole.
+    Any strip that doesn't overlap a hole in y comes back as-is (hole-free);
+    a strip that spans a hole's full width naturally comes back as two
+    separate polygons (below/above the hole) once Shapely intersects it --
+    no special-casing needed here.
+    """
+    if not poly.interiors:
+        return [poly] if not poly.is_empty and poly.area > 1e-9 else []
+
+    minx, miny, maxx, maxy = poly.bounds
+    xs = {minx, maxx}
+    for ring in poly.interiors:
+        ring_minx, _, ring_maxx, _ = Polygon(ring).bounds
+        xs.add(ring_minx)
+        xs.add(ring_maxx)
+    xs = sorted(xs)
+
+    pieces = []
+    for x0, x1 in zip(xs, xs[1:]):
+        if x1 - x0 < 1e-9:
+            continue
+        strip = poly.intersection(box(x0, miny - 1.0, x1, maxy + 1.0))
+        if strip.is_empty:
+            continue
+        if strip.geom_type == 'Polygon':
+            candidates = [strip]
+        elif strip.geom_type in ('MultiPolygon', 'GeometryCollection'):
+            # GeometryCollection can show up when the strip's edge exactly
+            # coincides with the hole's edge -- Shapely then also reports the
+            # degenerate shared edge as a zero-area LineString/Point alongside
+            # the real polygon pieces; just ignore anything non-polygonal.
+            candidates = [g for g in strip.geoms if g.geom_type == 'Polygon']
+        else:
+            candidates = []
+        pieces.extend(p for p in candidates if not p.is_empty and p.area > 1e-9)
+    return pieces
 
 
 def _ordered_subpolygons(zone_geom, start_xy):
     if isinstance(zone_geom, MultiPolygon):
-        polys = [p for p in zone_geom.geoms if not p.is_empty and p.area > 1e-9]
+        candidates = [p for p in zone_geom.geoms if not p.is_empty and p.area > 1e-9]
     elif zone_geom.is_empty or zone_geom.area <= 1e-9:
-        polys = []
+        candidates = []
     else:
-        polys = [zone_geom]
+        candidates = [zone_geom]
+
+    polys = []
+    for p in candidates:
+        polys.extend(_split_out_holes(p))
 
     ordered = []
     remaining = list(polys)
@@ -28,54 +87,86 @@ def _ordered_subpolygons(zone_geom, start_xy):
     return ordered
 
 
-def _sweep_polygon(poly, line_spacing):
-    """Return an ordered list of (x, y) waypoints covering `poly` with scan lines.
+def _sweep_cells(poly, cell_size, grid_origin):
+    """Return an ordered list of grid-cell *centers* covering `poly`.
 
-    A scan line can hit more than one disjoint segment when a dead-zone hole
-    sits in the middle of it (left-of-hole / right-of-hole). Connecting those
-    segments directly, end to end, would fly the straight-line "go_to" leg
-    right over the hole. Instead we detour through whichever polygon edge
-    (bottom/top of this sub-polygon's bounds) is closer -- dead-zone holes are
-    strictly interior, so that edge is always clear -- before continuing the
-    next segment. Adds extra travel but never overflies a dead zone.
+    Cells are `cell_size` x `cell_size`, aligned to `grid_origin` (shared
+    across all pieces of a zone so neighboring pieces' cells line up rather
+    than each piece inventing its own grid from its own bounding box). A row
+    is only ever a single contiguous run of cells because `poly` is hole-free
+    (see _split_out_holes) -- no mid-row gaps to worry about.
     """
+    ox, oy = grid_origin
     minx, miny, maxx, maxy = poly.bounds
+    first_row = math.floor((miny - oy) / cell_size - 0.5)
+    last_row = math.ceil((maxy - oy) / cell_size - 0.5)
+
     waypoints = []
     left_to_right = True
-    y = miny
-    while y <= maxy + 1e-9:
+    for row in range(first_row, last_row + 1):
+        y = oy + (row + 0.5) * cell_size
+        if y < miny - cell_size or y > maxy + cell_size:
+            continue
         line = LineString([(minx - 1.0, y), (maxx + 1.0, y)])
         inter = poly.intersection(line)
-        if not inter.is_empty:
-            if inter.geom_type == 'LineString':
-                segments = [inter]
-            elif inter.geom_type == 'MultiLineString':
-                segments = list(inter.geoms)
-            else:
-                segments = []
-            segments.sort(key=lambda s: s.bounds[0])
-            if not left_to_right:
-                segments = segments[::-1]
-            prev_x = None
-            safe_y = miny if (y - miny) <= (maxy - y) else maxy
-            for seg in segments:
-                x0, x1 = seg.bounds[0], seg.bounds[2]
-                if not left_to_right:
-                    x0, x1 = x1, x0
-                if prev_x is not None:
-                    waypoints.append((prev_x, safe_y))
-                    waypoints.append((x0, safe_y))
-                waypoints.append((x0, y))
-                waypoints.append((x1, y))
-                prev_x = x1
+        if inter.is_empty or inter.geom_type != 'LineString':
+            left_to_right = not left_to_right
+            continue
+        seg_minx, seg_maxx = inter.bounds[0], inter.bounds[2]
+        first_col = math.ceil((seg_minx - ox) / cell_size - 0.5)
+        last_col = math.floor((seg_maxx - ox) / cell_size - 0.5)
+        cols = range(first_col, last_col + 1)
+        if not left_to_right:
+            cols = reversed(list(cols))
+        for col in cols:
+            x = ox + (col + 0.5) * cell_size
+            waypoints.append((x, y))
         left_to_right = not left_to_right
-        y += line_spacing
     return waypoints
 
 
+def _safe_transit(zone_geom, p1, p2):
+    """Return extra waypoints (possibly none) to get from p1 to p2 without
+    crossing a hole. Nearest-piece ordering can still place two pieces that
+    flank the *same* hole back to back (e.g. "above the hole" right before
+    "below the hole") where a straight line between them cuts straight
+    through it, even though each piece's own sweep never does.
+
+    Tries an L-shaped detour via each of the zone's four outer bounding-box
+    edges (always hole-free, since holes are strictly interior) and picks
+    the shortest one that's actually verified clear; only used when the
+    direct line isn't already safe.
+    """
+    zone_buffered = zone_geom.buffer(1e-6)
+    if zone_buffered.contains(LineString([p1, p2])):
+        return []
+    minx, miny, maxx, maxy = zone_geom.bounds
+    candidates = []
+    for y in (miny, maxy):
+        candidates.append([p1, (p1[0], y), (p2[0], y), p2])
+    for x in (minx, maxx):
+        candidates.append([p1, (x, p1[1]), (x, p2[1]), p2])
+    safe = [via for via in candidates if zone_buffered.contains(LineString(via))]
+    pool = safe or candidates  # best-effort fallback if nothing verifies clean
+    best = min(pool, key=lambda via: LineString(via).length)
+    return best[1:3]
+
+
 def plan_coverage(zone_geom, line_spacing, start_xy):
-    """zone_geom: shapely Polygon/MultiPolygon. Returns ordered [(x, y), ...] waypoints."""
+    """zone_geom: shapely Polygon/MultiPolygon. Returns ordered [(x, y), ...] cell-center
+    waypoints, one per line_spacing x line_spacing cell inside the zone."""
+    if zone_geom.is_empty:
+        return []
+    grid_origin = (zone_geom.bounds[0], zone_geom.bounds[1])  # shared by every piece
+
     waypoints = []
+    last_point = None
     for poly in _ordered_subpolygons(zone_geom, start_xy):
-        waypoints.extend(_sweep_polygon(poly, line_spacing))
+        piece_wps = _sweep_cells(poly, line_spacing, grid_origin)
+        if not piece_wps:
+            continue
+        if last_point is not None:
+            waypoints.extend(_safe_transit(zone_geom, last_point, piece_wps[0]))
+        waypoints.extend(piece_wps)
+        last_point = piece_wps[-1]
     return waypoints

@@ -5,6 +5,12 @@
 
 const FALLBACK_COLORS = { cf1: '#ff5555', cf2: '#55aaff', cf3: '#55dd77' };
 
+// "visited path" tracking only makes sense once a drone is actually following
+// its coverage path -- before COVERING (still on the ground / awaiting the
+// Start button) the drone's position is its home position, which can happen
+// to sit near the *middle* of a zig-zag path and falsely look "visited".
+const FLYING_STATES = new Set(['COVERING', 'RETURN_HOME', 'LAND', 'PUBLISH_MARKERS', 'DONE']);
+
 function w2t(x, y, z) {
   return new THREE.Vector3(x, z || 0, y);
 }
@@ -71,6 +77,7 @@ class GcsScene {
 
     this.droneMeshes = {};
     this.markerMeshes = {};
+    this.visitedHighWaterMark = {}; // droneId -> last known "flown up to" waypoint index
 
     window.addEventListener('resize', () => this.onResize(container));
   }
@@ -88,7 +95,7 @@ class GcsScene {
       this.mapGroup.add(lineLoopFromPoints(boundary, 0x44cc44, 0.01));
       const shape = polygonShape(boundary);
       const geom = new THREE.ShapeGeometry(shape);
-      geom.rotateX(-Math.PI / 2);
+      geom.rotateX(Math.PI / 2);
       const ground = new THREE.Mesh(
         geom, new THREE.MeshBasicMaterial({ color: 0x222831, side: THREE.DoubleSide }));
       this.mapGroup.add(ground);
@@ -108,7 +115,7 @@ class GcsScene {
       this.mapGroup.add(lineLoopFromPoints(pts, 0xcc4444, 0.02));
       const shape = polygonShape(pts);
       const geom = new THREE.ShapeGeometry(shape);
-      geom.rotateX(-Math.PI / 2);
+      geom.rotateX(Math.PI / 2);
       geom.translate(0, 0.015, 0);
       const mesh = new THREE.Mesh(
         geom, new THREE.MeshBasicMaterial({
@@ -125,7 +132,7 @@ class GcsScene {
         if (pts.length < 3) return;
         const shape = polygonShape(pts);
         const geom = new THREE.ShapeGeometry(shape);
-        geom.rotateX(-Math.PI / 2);
+        geom.rotateX(Math.PI / 2);
         geom.translate(0, 0.008, 0);
         const mesh = new THREE.Mesh(
           geom, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.16, side: THREE.DoubleSide }));
@@ -134,19 +141,28 @@ class GcsScene {
     });
   }
 
-  setPaths(paths, drones, zoneColors) {
+  setPaths(paths, drones, zoneColors, missionState) {
     while (this.pathGroup.children.length) this.pathGroup.remove(this.pathGroup.children[0]);
+    if (!FLYING_STATES.has(missionState)) {
+      // Not flying yet -- reset progress so a new mission run starts clean.
+      this.visitedHighWaterMark = {};
+    }
     Object.entries(paths).forEach(([droneId, wps]) => {
       if (!wps || wps.length < 2) return;
       const color = new THREE.Color(zoneColors[droneId] || FALLBACK_COLORS[droneId] || '#cccccc');
       const drone = drones.find((d) => d.id === droneId);
-      let visitedUpTo = 0;
-      if (drone) {
+      let visitedUpTo = this.visitedHighWaterMark[droneId] || 0;
+      if (drone && FLYING_STATES.has(missionState)) {
         let bestDist = Infinity;
+        let nearestIdx = 0;
         wps.forEach((wp, idx) => {
           const d = Math.hypot(wp[0] - drone.x, wp[1] - drone.y);
-          if (d < bestDist) { bestDist = d; visitedUpTo = idx; }
+          if (d < bestDist) { bestDist = d; nearestIdx = idx; }
         });
+        // Monotonic: never let the "visited" marker jump backwards, since the
+        // zig-zag path can pass close to earlier legs again later on.
+        visitedUpTo = Math.max(visitedUpTo, nearestIdx);
+        this.visitedHighWaterMark[droneId] = visitedUpTo;
       }
       const full = wps.map(([x, y, z]) => w2t(x, y, z));
       const plannedGeom = new THREE.BufferGeometry().setFromPoints(full);
@@ -271,7 +287,7 @@ function main() {
       state.zones.forEach((z) => { zoneColors[z.drone_id] = z.color; });
       gcsScene.setZones(state.zones);
       buildLegend(state.zones);
-      gcsScene.setPaths(state.paths, state.drones, zoneColors);
+      gcsScene.setPaths(state.paths, state.drones, zoneColors, state.mission_state);
       gcsScene.setMarkers(state.markers);
       gcsScene.setDrones(state.drones, zoneColors);
     }).catch(() => {}).finally(() => setTimeout(pollState, 300));

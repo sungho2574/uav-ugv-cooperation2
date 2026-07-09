@@ -223,9 +223,10 @@ stateDiagram-v2
 
 - 빌드 타입: `ament_python`. 의존 라이브러리: `shapely`, `PyYAML`, `numpy`.
 - **`control_node.py`**: 4절에서 설명한 FSM 전체. crazyswarm2의 액션 서버가 존재하지 않는다는 점(전부 fire-and-forget 서비스)을 고려해, `crazyflie_py`의 `Crazyswarm` 래퍼를 쓰지 않고 `/cfN/takeoff`,`/cfN/land`,`/cfN/go_to` 서비스 클라이언트를 직접 만들어 쓴다. 블로킹 sleep이 전혀 없는 10Hz 타이머 기반 논블로킹 FSM이라 `/detections` 구독을 비행 중에도 계속 처리한다.
-  - 주요 파라미터: `mission_map_path`(필수), `cruise_speed`(기본 0.3 m/s), `min_leg_duration`(1.5s), `leg_settle_margin`(0.5s), `takeoff_duration`(2.0s), `takeoff_settle_time`(2.5s), `land_duration`(2.5s), `land_settle_time`(3.0s), `start_immediately`(false — GCS 버튼 없이 즉시 시작하고 싶을 때 true).
-- **`zone_split.py`**: `build_free_space()`가 `boundary`+`dead_zones`로 Shapely `Polygon(holes=...)`를 만들고, `assign_zones_to_drones()`가 x축 기준 등폭 세로 스트립으로 나눈 뒤 드론 홈 위치의 x좌표 순서와 매칭한다. Dead-zone에 걸리면 zone이 `MultiPolygon`이 될 수 있으며 그대로 허용한다.
-- **`coverage_plan.py`**: `plan_coverage()`가 zone의 하위 폴리곤들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤, 각 폴리곤에 `coverage_line_spacing` 간격 수평 스캔라인을 긋고 좌우 번갈아(lawnmower) 연결한 waypoint 리스트를 반환한다.
+  - 주요 파라미터: `mission_map_path`(필수), `cruise_speed`(기본 0.3 m/s), `min_leg_duration`(1.5s), `leg_settle_margin`(0.5s), `takeoff_duration`(2.0s), `takeoff_settle_time`(2.5s), `land_duration`(2.5s), `land_settle_time`(3.0s), `start_immediately`(false — GCS 버튼 없이 즉시 시작하고 싶을 때 true), `dead_zone_margin`(0.15m — 아래 `zone_split.py` 설명 참고).
+  - **구간(leg) 소요시간 계산은 실측 위치 기반**: 다음 waypoint까지의 `go_to` `duration`(=거리/`cruise_speed`, 최소 `min_leg_duration`)을 계산할 때 "마지막으로 보낸 목표에 이미 도착했다"고 가정하지 않고, `/states`를 구독해 실제 측정 위치(`live_xy`)에서부터의 거리로 계산한다. sim/real 타이밍이 우리 wall-clock 가정과 어긋나 실제 위치가 뒤처져 있는데도 그 사실을 모른 채 다음 구간을 계산하면, 남은 실제 거리에 비해 `duration`이 지나치게 짧게 잡혀 crazyswarm2의 `go_to`가 불가능한 가속도를 요구하며 불안정해질 수 있다(공식 문서에도 명시된 위험) — 이를 피하기 위한 장치.
+- **`zone_split.py`**: `build_free_space()`가 `boundary`+`dead_zones`로 free-space 폴리곤을 만드는데, 이때 `dead_zone_margin`만큼 각 dead-zone을 부풀린 뒤 빼서(`difference`) 커버리지 경로가 dead-zone 경계에 완전히 붙어버리는 일(스윕 라인 간격이 우연히 dead-zone 좌표와 일치하는 경우 생길 수 있음)을 막는다. `assign_zones_to_drones()`가 x축 기준 등폭 세로 스트립으로 나눈 뒤 드론 홈 위치의 x좌표 순서와 매칭한다. Dead-zone에 걸리면 zone이 `MultiPolygon`이 될 수 있으며 그대로 허용한다.
+- **`coverage_plan.py`**: `plan_coverage()`가 zone의 하위 폴리곤들을 홈 위치에서 가까운 순으로 방문하도록 정렬한 뒤, 각 폴리곤에 `coverage_line_spacing` 간격 수평 스캔라인을 긋고 좌우 번갈아(lawnmower) 연결한 waypoint 리스트를 반환한다. 한 스캔라인이 dead-zone에 걸려 좌/우 두 구간으로 쪼개지면, 그 둘을 직선으로 바로 잇지 않고(=dead-zone 상공을 가로지르게 됨) zone 폴리곤의 위/아래 가장자리(dead-zone이 닿지 않는, 항상 안전한 경계)로 우회한다.
 - 두 모듈 모두 rclpy에 의존하지 않는 순수 함수라 독립적으로 단위 테스트 가능하다 (예제 지도로 free-space 면적==zone 면적 합, 모든 waypoint가 자기 zone 내부에 있음을 확인 완료).
 
 ## 7. `cf_perception` 패키지 상세

@@ -131,3 +131,4 @@ ros2 service call /mission/start std_srvs/srv/Trigger
 | GCS 3D 뷰에 zone/경로가 안 보임 | `/mission/zones`, `/mission/coverage_paths`가 실제 발행됐는지(`ros2 topic echo ... --once`), gcs_node가 해당 토픽에 대해 같은 QoS(Transient Local)로 구독 중인지(코드 그대로면 문제 없음) |
 | 실기체 영상은 뜨는데 마커 world 좌표가 명백히 틀림 | `camera_intrinsics.yaml` 캘리브레이션 여부, `R_CAM_TO_BODY` 장착각 가정, `/cfN/pose`와 프레임 캡처 시각 차이(0.2초 동기화 허용오차) 확인 |
 | 드론 위치가 시간이 지날수록 dashboard에서 서서히 어긋남 | 모션캡처 없이 온보드 추정치만 쓰는 구조의 알려진 한계(드리프트) — 임무 범위/시간을 줄이거나 외부 포지셔닝 시스템 도입 검토 |
+| 이륙 후 커버리지 도중 드론이 갑자기 비정상적으로 빠르게 튀어서 지도 밖으로 나가 멈춤 | `control_node`가 `/states`(실측 위치)를 받고 있는지 확인(`ros2 topic hz /states`) — 못 받으면 구간 소요시간을 "마지막 명령 목표에 이미 도착했다"는 가정만으로 계산해서, 실제 위치가 뒤처져 있을 때 `go_to`에 남은 거리에 비해 너무 짧은 `duration`이 전달되어 crazyswarm2가 불안정한 궤적을 계획할 수 있음. 그래도 재현되면 `cruise_speed`를 낮추거나 `min_leg_duration`/`leg_settle_margin`을 늘려서 여유를 더 주고 재시도 |

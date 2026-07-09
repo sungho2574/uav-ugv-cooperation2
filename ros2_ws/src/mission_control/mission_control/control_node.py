@@ -28,7 +28,7 @@ from geometry_msgs.msg import Point, Point32
 from geometry_msgs.msg import Polygon as PolygonMsg
 from geometry_msgs.msg import PoseStamped
 from mission_interfaces.msg import (
-    CoveragePath, CoveragePathArray, MarkerDetection, MarkerRecord,
+    CoveragePath, CoveragePathArray, DroneState, MarkerDetection, MarkerRecord,
     MarkerRecordArray, ZoneAssignment, ZoneAssignmentArray,
 )
 from nav_msgs.msg import Path
@@ -163,6 +163,17 @@ class ControlNode(Node):
             MarkerDetection, '/detections', self._on_detection, 10)
         self.detected_markers = {}  # marker_id -> (x, y, z)
 
+        # Real measured position per drone (from /states, same feed cf_perception
+        # publishes for the GCS). Used instead of blindly assuming a drone has
+        # already reached the last commanded target -- if sim/real timing runs
+        # faster or slower than our wall-clock leg-duration estimate, computing
+        # the next leg's distance from a *wrong* assumed start point produces a
+        # too-short duration for the real distance still left to cover, which
+        # crazyswarm2's own go_to docs warn drives an unstable/runaway trajectory.
+        self.states_sub = self.create_subscription(
+            DroneState, '/states', self._on_drone_state, 20)
+        self.live_xy = {}  # drone_id -> (x, y)
+
         self._start_requested = self.get_parameter('start_immediately').value
         self.start_srv = self.create_service(Trigger, '/mission/start', self._on_start_request)
 
@@ -187,6 +198,9 @@ class ControlNode(Node):
         self.state_pub.publish(String(data=new_state))
 
     # ---- callbacks ---------------------------------------------------
+    def _on_drone_state(self, msg):
+        self.live_xy[msg.drone_id] = (msg.position.x, msg.position.y)
+
     def _on_detection(self, msg):
         if msg.marker_id not in self.detected_markers:
             self.get_logger().info(
@@ -310,7 +324,8 @@ class ControlNode(Node):
                 continue
             target_xy = handle.waypoints[handle.wp_index]
             handle.wp_index += 1
-            leg_dist = dist2d(handle.last_target_xy, target_xy)
+            current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
+            leg_dist = dist2d(current_xy, target_xy)
             duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
             handle.send_go_to(
                 (target_xy[0], target_xy[1], self.cruise_altitude), 0.0, duration)
@@ -332,7 +347,8 @@ class ControlNode(Node):
             max_duration = 0.0
             for handle in self.drones.values():
                 home_xy = (handle.home_position[0], handle.home_position[1])
-                leg_dist = dist2d(handle.last_target_xy, home_xy)
+                current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
+                leg_dist = dist2d(current_xy, home_xy)
                 duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
                 handle.send_go_to(
                     (home_xy[0], home_xy[1], self.cruise_altitude), 0.0, duration)

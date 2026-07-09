@@ -97,7 +97,7 @@ flowchart TD
     FUTURE["(추후) UGV 라우팅 노드"]
 
     CTRL -->|"/cfN/takeoff, /cfN/land, /cfN/go_to"| CFS
-    CFS -->|"/cfN/pose"| PERC
+    CFS -->|"/cfN/pose (real) 또는 /tf (sim, tf2 조회)"| PERC
 
     PERC -->|"/states"| GCS
     PERC -->|"/detections"| CTRL
@@ -118,7 +118,7 @@ flowchart TD
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `crazyflie_server` (crazyswarm2) | -                                                                                                              | `/cfN/pose` (x3)                                                                  | sim/real 백엔드 모두 동일 토픽                                                                  |
 | `control_node`                   | `/detections`                                                                                                  | `/mission/zones`, `/mission/coverage_paths`, `/mission/state`, `/mission/markers` | `/cfN/takeoff`,`/cfN/land`,`/cfN/go_to` 서비스 **클라이언트**, `/mission/start` 서비스 **서버** |
-| `sim_perception_node`            | `/cfN/pose` (x3)                                                                                               | `/states`, `/detections`                                                          | `true_markers.yaml`(ground-truth)은 이 노드만 읽음                                              |
+| `sim_perception_node`            | `/tf` (tf2 조회, `world→cfN`)                                                                                   | `/states`, `/detections`                                                          | sim 백엔드는 `/cfN/pose`를 발행하지 않아 tf2로 위치를 얻음. `true_markers.yaml`(ground-truth)은 이 노드만 읽음 |
 | `real_perception_node`           | `/cfN/pose` (x3)                                                                                               | `/states`, `/detections`, `/cfN/image_raw` (x3)                                   | AI-deck WiFi 소켓에서 직접 영상 수신(토픽 아님)                                                 |
 | `gcs_node`                       | `/states`, `/detections`, `/mission/zones`, `/mission/coverage_paths`, `/mission/state`, `/cfN/image_raw` (x3) | -                                                                                 | `/mission/start` 서비스 **클라이언트** (REST `/api/mission/start`로 트리거)                     |
 
@@ -232,8 +232,8 @@ stateDiagram-v2
 
 - 빌드 타입: `ament_python`. sim/real 두 실행 파일이 **동일한 토픽 계약**(`/states`, `/detections`)을 지켜서, `control_node`/`gcs_dashboard`는 어느 쪽이 떠 있는지 몰라도 된다.
 - **`sim_perception_node.py`**:
-  - 파라미터: `drone_ids`(기본 `[cf1,cf2,cf3]`), `mission_map_path`(필수, `grid_resolution`만 참조), `true_markers_path`(필수).
-  - `/cfN/pose` 구독 → `/states` 중계. 매 pose 업데이트마다 미검출 ground-truth 마커까지의 평면거리를 계산해 `grid_resolution/2` 이내면 `/detections` 발행(마커별 1회만).
+  - 파라미터: `drone_ids`(기본 `[cf1,cf2,cf3]`), `mission_map_path`(필수, `grid_resolution`만 참조), `true_markers_path`(필수), `world_frame`(기본 `world`, `crazyflies.yaml`의 `reference_frame`과 일치해야 함), `poll_rate_hz`(기본 10Hz).
+  - **주의**: crazyswarm2의 **sim 백엔드**(`crazyflie_sim/crazyflie_server.py`)는 `/cfN/pose`를 아예 발행하지 않는다 — 기본 활성화된 `rviz` visualization 플러그인이 `/tf`에 `world → cfN` 변환만 방송한다(real/cflib 백엔드는 반대로 `/cfN/pose`를 정상 발행함). 그래서 이 노드는 `/cfN/pose`를 구독하는 대신 **tf2로 `world→cfN` 변환을 폴링**해서 위치를 얻는다. 매 폴링마다 `/states`를 재발행하고, 미검출 ground-truth 마커까지의 평면거리를 계산해 `grid_resolution/2` 이내면 `/detections` 발행(마커별 1회만).
   - `true_markers.yaml`은 이 노드만 읽는다 — `control_node`/`gcs_dashboard`는 절대 읽지 않아 "눈가림 탐색"이 유지된다.
 - **`real_perception_node.py`**:
   - 파라미터: `drone_ids`, `wifi_ips`(드론별 AI-deck WiFi IP, `drone_ids`와 순서 일치), `wifi_port`(기본 5000), `marker_size`(기본 0.14m), `camera_intrinsics_path`.

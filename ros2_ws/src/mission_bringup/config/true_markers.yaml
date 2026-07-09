@@ -1,0 +1,23 @@
+# Ground-truth ArUco marker positions, sim-only. Only sim_perception_node reads this
+# file (via the `true_markers_path` parameter) -- control_node and gcs_dashboard never
+# see it, so the search stays "blind" just like it would be with real cameras.
+# Positions are chosen to land inside the example mission_map.yaml boundary
+# (10x6 rectangle minus the [4,2]-[5,3] obstacle_1 hole), one marker per drone's
+# strip plus one extra to make dedup/coverage easy to eyeball during a smoke test.
+markers:
+  - id: 1
+    x: 1.5
+    y: 1.0
+    z: 0.0
+  - id: 2
+    x: 5.5
+    y: 4.5
+    z: 0.0
+  - id: 3
+    x: 8.5
+    y: 2.5
+    z: 0.0
+  - id: 4
+    x: 3.0
+    y: 5.2
+    z: 0.0

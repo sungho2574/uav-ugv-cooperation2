@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mission_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files and mission configuration tying crazyswarm2 + mission_control + cf_perception + gcs_dashboard together</description>
+  <maintainer email="sungho2574@gmail.com">sungho</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>crazyflie</exec_depend>
+  <exec_depend>mission_control</exec_depend>
+  <exec_depend>cf_perception</exec_depend>
+  <exec_depend>gcs_dashboard</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

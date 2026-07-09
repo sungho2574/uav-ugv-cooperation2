@@ -1,0 +1,30 @@
+# Known survey-area map, loaded directly (plain YAML, not a ROS2 parameter file).
+# control_node is given the path to this file via the `mission_map_path` parameter
+# and parses it itself with PyYAML. boundary is CCW; dead_zones are holes excluded
+# from coverage.
+frame_id: "map"
+grid_resolution: 0.10
+uav_cruise_altitude: 1.0
+coverage_line_spacing: 0.5
+marker_size: 0.14
+
+boundary: [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]]
+
+dead_zones:
+  - name: "obstacle_1"
+    points: [[4.0, 2.0], [5.0, 2.0], [5.0, 3.0], [4.0, 3.0]]
+
+drones:
+  - id: "cf1"
+    home_position: [0.5, 0.5, 0.0]
+    home_yaw: 0.0
+  - id: "cf2"
+    home_position: [0.5, 3.0, 0.0]
+    home_yaw: 0.0
+  - id: "cf3"
+    home_position: [0.5, 5.5, 0.0]
+    home_yaw: 0.0
+
+ugv:
+  start_position: [0.5, 0.0, 0.0]
+  start_yaw: 0.0

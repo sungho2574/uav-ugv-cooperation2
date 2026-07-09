@@ -1,0 +1,9 @@
+# Placeholder AI-deck (324x244) intrinsics, copied from the values used in
+# uav-ugv-cooperation/dashboard/dashboard_aruco.py. UNCALIBRATED -- replace with a
+# real checkerboard calibration of your AI-deck cameras before trusting marker
+# positions from real_perception_node.
+camera_matrix:
+  - [320.0, 0.0, 162.0]
+  - [0.0, 320.0, 122.0]
+  - [0.0, 0.0, 1.0]
+dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]

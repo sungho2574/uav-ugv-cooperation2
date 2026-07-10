@@ -174,7 +174,6 @@ class ControlNode(Node):
         super().__init__('control_node')
 
         self.declare_parameter('mission_map_path', '')
-        self.declare_parameter('cruise_speed', 0.3)
         self.declare_parameter('min_leg_duration', 1.5)
         self.declare_parameter('leg_settle_margin', 0.5)
         self.declare_parameter('takeoff_duration', 2.0)
@@ -185,7 +184,6 @@ class ControlNode(Node):
         self.declare_parameter('dead_zone_margin', 0.15)
         self.declare_parameter('arrival_radius', 0.25)
 
-        self.cruise_speed = self.get_parameter('cruise_speed').value
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
         self.leg_settle_margin = self.get_parameter('leg_settle_margin').value
         self.takeoff_duration = self.get_parameter('takeoff_duration').value
@@ -203,6 +201,14 @@ class ControlNode(Node):
         self.mission_map = self._load_mission_map(mission_map_path)
         self.cruise_altitude = float(self.mission_map['uav_cruise_altitude'])
         self.coverage_line_spacing = float(self.mission_map['coverage_line_spacing'])
+        # Coverage streaming reference speed, m/s (control_node's
+        # cmd_full_state advances along the path at this rate) -- kept in
+        # mission_map.yaml, not a launch/ROS parameter, so it can just be
+        # edited there like every other mission-tuning value (cruise
+        # altitude, line spacing, ...). Lower it if cells are being missed:
+        # the drone tracks a faster-moving reference more loosely, so it may
+        # never come within arrival_radius of every cell center.
+        self.cruise_speed = float(self.mission_map.get('cruise_speed', 0.3))
 
         self.drones = {}
         # home_position here is just a startup placeholder -- _do_plan() below

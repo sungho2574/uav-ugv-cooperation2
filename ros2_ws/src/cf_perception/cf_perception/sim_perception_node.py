@@ -71,7 +71,10 @@ class SimPerceptionNode(Node):
                 'sim_perception_node requires the true_markers_path parameter')
         with open(true_markers_path, 'r') as f:
             data = yaml.safe_load(f)
-        self.true_markers = data.get('markers', [])
+        # `or []` (not just `.get(..., [])`): a bare `markers:` key with
+        # nothing under it parses to None in YAML, which the dict default
+        # doesn't catch -- same gotcha as mission_map.yaml's dead_zones.
+        self.true_markers = data.get('markers') or []
         self.undetected_ids = {m['id'] for m in self.true_markers}
 
         self.states_pub = self.create_publisher(DroneState, '/states', 10)

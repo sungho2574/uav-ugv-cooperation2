@@ -170,7 +170,7 @@ class GcsNode(Node):
             data = yaml.safe_load(f)
         return [
             {'id': m['id'], 'x': m['x'], 'y': m['y'], 'z': m.get('z', 0.0)}
-            for m in data.get('markers', [])
+            for m in (data.get('markers') or [])
         ]
 
     def _on_state(self, msg: DroneState):

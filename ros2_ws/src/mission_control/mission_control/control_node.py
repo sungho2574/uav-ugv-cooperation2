@@ -47,8 +47,7 @@ from nav_msgs.msg import Path
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from mission_control.coverage_plan import plan_coverage
-from mission_control.zone_split import assign_cells_to_drones, build_cells
+from mission_control.mission_planner import plan_mission
 
 LATCHED_QOS = QoSProfile(
     depth=1,
@@ -213,11 +212,16 @@ class ControlNode(Node):
         # the drone tracks a faster-moving reference more loosely, so it may
         # never come within arrival_radius of every cell center.
         self.cruise_speed = float(self.mission_map.get('cruise_speed', 0.3))
+        # SCoPP path-planning profile: 'paper_nn' (greedy nearest-neighbour,
+        # default) or 'metric_tsp' (grid shortest-path TSP, shorter routes but
+        # a few seconds to plan on large zones). Edited in mission_map.yaml,
+        # same as every other mission-tuning value. See path_planning.py.
+        self.coverage_profile = self.mission_map.get('coverage_profile', 'paper_nn')
 
         self.drones = {}
         # home_position here is just a startup placeholder -- _do_plan() below
-        # overwrites it with the actual first cell of whatever zone this drone
-        # ends up assigned, once that's known (see coverage_plan.plan_coverage).
+        # overwrites it with the start cell of whatever zone this drone ends up
+        # allocated, once that's known (see mission_planner.plan_mission).
         for drone_id in self.drone_ids:
             handle = DroneHandle(self, drone_id, [0.0, 0.0, 0.0])
             handle.wait_for_services(self, timeout_sec=5.0)
@@ -329,9 +333,13 @@ class ControlNode(Node):
         dead_zones = [
             [tuple(p) for p in dz['points']] for dz in (self.mission_map.get('dead_zones') or [])
         ]
-        cells = build_cells(
-            boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
-        self.zone_cells = assign_cells_to_drones(cells, self.drone_ids)
+        # Full SCoPP pipeline (grid -> Lloyd/auction allocation -> coverage
+        # path) in one call, so control_node and the launch files compute the
+        # exact same plan. _do_plan below just reads the stored result.
+        self.mission_plans = plan_mission(
+            boundary, dead_zones, self.coverage_line_spacing, self.drone_ids,
+            dead_zone_margin=self.dead_zone_margin, profile=self.coverage_profile)
+        self.zone_cells = {d: plan.cells for d, plan in self.mission_plans.items()}
 
     @staticmethod
     def _build_cum_dist(waypoints):
@@ -349,8 +357,7 @@ class ControlNode(Node):
         # inside the 3rd region, not at some unrelated pre-given point that
         # then needs a long straight commute to reach its own zone.
         for drone_id, handle in self.drones.items():
-            cells = self.zone_cells[drone_id]
-            handle.waypoints = plan_coverage(cells)
+            handle.waypoints = self.mission_plans[drone_id].waypoints
             if handle.waypoints:
                 home_xy = handle.waypoints[0]
                 handle.home_position = (home_xy[0], home_xy[1], 0.0)
@@ -368,7 +375,7 @@ class ControlNode(Node):
         for drone_id, cells in self.zone_cells.items():
             za = ZoneAssignment(drone_id=drone_id)
             for cell in cells:
-                cx, cy = cell['x'], cell['y']
+                cx, cy = cell.center
                 pmsg = PolygonMsg()
                 pmsg.points = [
                     Point32(x=float(cx - half), y=float(cy - half), z=0.0),

@@ -55,7 +55,7 @@ class SimPerceptionNode(Node):
         with open(mission_map_path, 'r') as f:
             mission_map = yaml.safe_load(f)
         # control_node's coverage plan visits the *center* of each
-        # coverage_line_spacing x line_spacing cell (see coverage_plan.py), so a
+        # coverage_line_spacing x line_spacing cell (see path_planning.py), so a
         # marker anywhere inside that cell -- worst case, right in a corner --
         # must still count as "reached" once the drone visits the cell center.
         # Corner distance from a cell's center is line_spacing * sqrt(2) / 2;

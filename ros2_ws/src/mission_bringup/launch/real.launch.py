@@ -36,8 +36,7 @@ from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
-from mission_control.coverage_plan import plan_coverage
-from mission_control.zone_split import assign_cells_to_drones, build_cells
+from mission_control.mission_planner import plan_mission
 
 # Must match control_node's `dead_zone_margin` parameter default -- see
 # sim.launch.py's _compute_homes for why both sides compute independently.
@@ -57,14 +56,11 @@ def _compute_homes(mission_map, drone_ids):
     boundary = [tuple(p) for p in mission_map['boundary']]
     # See sim.launch.py for why `or []` (not just `.get(..., [])`) is needed.
     dead_zones = [[tuple(p) for p in dz['points']] for dz in (mission_map.get('dead_zones') or [])]
-    cells = build_cells(
-        boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
-    zone_cells = assign_cells_to_drones(cells, drone_ids)
-    homes = {}
-    for drone_id in drone_ids:
-        waypoints = plan_coverage(zone_cells[drone_id])
-        homes[drone_id] = waypoints[0] if waypoints else (0.0, 0.0)
-    return homes
+    plans = plan_mission(
+        boundary, dead_zones, mission_map['coverage_line_spacing'], drone_ids,
+        dead_zone_margin=DEAD_ZONE_MARGIN,
+        profile=mission_map.get('coverage_profile', 'paper_nn'))
+    return {drone_id: plan.home for drone_id, plan in plans.items()}
 
 
 def _generate_crazyflies_yaml(crazyflies_cfg, homes, base_crazyflies_path):

@@ -15,13 +15,21 @@ marker_size: 0.14
 # center. See control_node.py's _step_covering/_update_visited_cells.
 cruise_speed: 0.1
 
+# SCoPP coverage path-planning profile (see path_planning.py):
+#   paper_nn   - greedy nearest-neighbour (KD-tree). Fast, default.
+#   metric_tsp - grid shortest-path TSP (Held-Karp <=20 targets, else
+#                cheapest-insertion + 2-opt). Shorter routes, but planning
+#                takes a few seconds per drone on large zones.
+coverage_profile: "paper_nn"
+
 boundary: [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]]
 
-# Kept in a corner on purpose: coverage_plan.py's ㄹ-shape sweep has no
-# hole-avoidance logic at all -- it just skips a cell if it's not in the
-# assigned cell list. A dead zone in the middle of a zone would cut a gap out
-# of the *middle* of some row, which the naive sweep would jump straight
-# across; tucked into a corner it only ever trims the end of a row instead.
+# Dead zones are holes excluded from coverage. Unlike the old ㄹ-shape sweep,
+# the SCoPP path planner stitches cells with a 4-neighbour A* (path_planning.py),
+# so a dead zone in the *middle* of a zone is routed around cleanly rather than
+# jumped straight across -- obstacles no longer need to be tucked into a corner.
+# (A dead zone that splits a drone's region into two disconnected pieces still
+# degrades to a straight jump between the pieces -- see plan_node_path.)
 dead_zones:
   - name: "obstacle_1"
     points: [[8.0, 5.0], [10.0, 5.0], [10.0, 6.0], [8.0, 6.0]]
@@ -33,10 +41,11 @@ dead_zones:
 # robots and use that as the drone_ids list everywhere (control_node,
 # cf_perception, gcs_dashboard). To fly with fewer than 3 drones, toggle
 # `enabled` per-robot in crazyflies.yaml -- nothing to change here.
-# Each drone's actual spawn point/home is computed at launch time as the
-# first cell of whichever zone it's assigned (Nth enabled drone in
-# crazyflies.yaml -> Nth region, left to right); home_yaw is always 0
-# (hardcoded in control_node.py, not configurable). See coverage_plan.py.
+# Each drone's actual spawn point/home is computed at launch time by the SCoPP
+# planner as the start cell of whichever zone it's allocated (drone i is seeded
+# into the i-th slice of the arena, then Lloyd clustering + auction refine the
+# zones); home_yaw is always 0 (hardcoded in control_node.py). See
+# mission_planner.py / grid.seed_positions.
 
 ugv:
   start_position: [0.5, 0.0, 0.0]

@@ -16,6 +16,14 @@
                background: #2e7d32; color: white; cursor: pointer; font-size: 13px; }
   #start-btn:hover:not(:disabled) { background: #388e3c; }
   #start-btn:disabled { background: #3a3d42; color: #8a8f96; cursor: default; }
+  #coverage-status { margin-top: 8px; font-size: 12px; color: #9aa0a6; }
+  #coverage-status .row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  #coverage-progress-track { width: 200px; height: 6px; background: #33363c;
+                              border-radius: 3px; overflow: hidden; }
+  #coverage-progress-fill { height: 100%; width: 0%; background: #4da6ff;
+                             transition: width 0.2s ease; }
+  #coverage-progress-label { min-width: 40px; text-align: right; }
+  #covering-elapsed { color: #cfd3d8; font-variant-numeric: tabular-nums; }
   #legend { position: absolute; bottom: 10px; left: 10px; background: rgba(20,22,26,0.75);
             padding: 8px 12px; border-radius: 6px; font-size: 12px; z-index: 2; }
   #legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
@@ -57,6 +65,16 @@
     <div id="hud">
       <span class="phase" id="phase-text">-</span>
       <button id="start-btn">Start Mission</button>
+      <div id="coverage-status">
+        <div class="row">
+          <div id="coverage-progress-track"><div id="coverage-progress-fill"></div></div>
+          <span id="coverage-progress-label">0%</span>
+        </div>
+        <div class="row">
+          <span>covering</span>
+          <span id="covering-elapsed">--:--</span>
+        </div>
+      </div>
     </div>
     <div id="legend"></div>
     <div id="marker-status"></div>

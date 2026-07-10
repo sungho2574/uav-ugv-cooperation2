@@ -466,11 +466,49 @@ function main() {
     }
   }
 
+  // Covering elapsed-time timer is purely client-side: the browser just
+  // remembers wall-clock time when it first sees mission_state flip to
+  // COVERING (and when it flips away again), no backend change needed --
+  // /mission/progress + /mission/state already carry everything else.
+  let coveringStartMs = null;
+  let coveringEndMs = null;
+  const formatElapsed = (ms) => {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
+
   let zoneColors = {};
   const pollState = () => {
     fetch('/api/state').then((r) => r.json()).then((state) => {
       safeCall('phase-text', () => {
         document.getElementById('phase-text').textContent = state.mission_state;
+      });
+      safeCall('coverage-status', () => {
+        if (state.mission_state === 'COVERING') {
+          if (coveringStartMs === null) { coveringStartMs = Date.now(); coveringEndMs = null; }
+        } else if (coveringStartMs !== null && coveringEndMs === null) {
+          coveringEndMs = Date.now();
+        }
+        if (state.mission_state === 'AWAITING_START') {
+          coveringStartMs = null;
+          coveringEndMs = null;
+        }
+        const elapsedEl = document.getElementById('covering-elapsed');
+        elapsedEl.textContent = coveringStartMs === null
+          ? '--:--' : formatElapsed((coveringEndMs || Date.now()) - coveringStartMs);
+
+        const progressByDrone = state.progress || {};
+        let visited = 0;
+        let total = 0;
+        Object.values(progressByDrone).forEach((p) => {
+          visited += (p.visited_indices || []).length;
+          total += p.total_waypoints || 0;
+        });
+        const pct = total > 0 ? Math.round((visited / total) * 100) : 0;
+        document.getElementById('coverage-progress-fill').style.width = pct + '%';
+        document.getElementById('coverage-progress-label').textContent = pct + '%';
       });
       safeCall('start-btn', () => {
         const canStart = state.mission_state === 'AWAITING_START';

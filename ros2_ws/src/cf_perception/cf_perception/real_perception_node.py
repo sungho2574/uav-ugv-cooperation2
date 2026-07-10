@@ -114,7 +114,7 @@ def quat_to_yaw(q):
 
 class ArucoDetector:
     def __init__(self, camera_matrix, dist_coeffs, marker_size_m):
-        aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
         params = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(aruco_dict, params)
         self.camera_matrix = camera_matrix

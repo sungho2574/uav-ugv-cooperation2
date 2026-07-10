@@ -91,13 +91,14 @@ class DroneHandle:
         self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
         self.cum_dist = [0.0]  # cum_dist[i] = arc length from waypoints[0] to waypoints[i]
         self.covering_start_time = None
-        # arrived_index: furthest waypoint the *commanded* streaming reference
-        # has reached so far (see ControlNode._step_covering) -- since that
-        # reference advances continuously and monotonically along the path
-        # and the drone tracks it closely, this is a simple, robust "visited"
-        # signal without needing to reconcile against live measured position
-        # on a zig-zag path (which is ambiguous: many cells can be spatially
-        # close to the current position without being "next").
+        # arrived_index: furthest waypoint the drone's *live measured*
+        # position has actually reached (see
+        # ControlNode._advance_arrived_index_by_position). Only ever walked
+        # forward from the current index, one waypoint at a time, so a
+        # zig-zag path's spatial ambiguity (many cells can be close to the
+        # current position without being "next") doesn't matter -- it can
+        # only advance to the immediate next unvisited waypoint in path
+        # order, never jump ahead.
         self.arrived_index = 0
         self.done = False
         self.last_target_xy = (home_position[0], home_position[1])
@@ -178,6 +179,7 @@ class ControlNode(Node):
         self.declare_parameter('land_settle_time', 3.0)
         self.declare_parameter('start_immediately', False)
         self.declare_parameter('dead_zone_margin', 0.15)
+        self.declare_parameter('arrival_radius', 0.25)
 
         self.cruise_speed = self.get_parameter('cruise_speed').value
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
@@ -186,6 +188,7 @@ class ControlNode(Node):
         self.takeoff_settle_time = self.get_parameter('takeoff_settle_time').value
         self.land_duration = self.get_parameter('land_duration').value
         self.land_settle_time = self.get_parameter('land_settle_time').value
+        self.arrival_radius = self.get_parameter('arrival_radius').value
         self.dead_zone_margin = self.get_parameter('dead_zone_margin').value
 
         mission_map_path = self.get_parameter('mission_map_path').value
@@ -417,17 +420,6 @@ class ControlNode(Node):
                 return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
         return waypoints[-1]
 
-    @staticmethod
-    def _reached_index(cum_dist, target_dist):
-        """Furthest waypoint index whose arc-length position is <= target_dist."""
-        idx = 0
-        for i, d in enumerate(cum_dist):
-            if d <= target_dist:
-                idx = i
-            else:
-                break
-        return idx
-
     def _publish_progress(self):
         array = DroneProgressArray()
         for handle in self.drones.values():
@@ -438,15 +430,45 @@ class ControlNode(Node):
             ))
         self.progress_pub.publish(array)
 
+    def _advance_arrived_index_by_position(self, handle):
+        """Advance arrived_index using the drone's *live measured* position
+        (self.live_xy, from /states), not the commanded streaming reference.
+
+        The reference in _step_covering slides continuously regardless of
+        where the drone actually is, so deriving "visited" from the
+        reference's own progress paints the GCS map ahead of the real
+        drone -- exactly the "미리 채워지는" bug reported. Since control no
+        longer waits for arrival to advance the reference (that coupling is
+        what caused the earlier understeer/corner-cutting issue), gating
+        *only the progress readout* on real position is now safe: it can't
+        stall the reference, it just reports true visited cells.
+        """
+        live_xy = self.live_xy.get(handle.drone_id)
+        if live_xy is None:
+            return False
+        changed = False
+        while handle.arrived_index + 1 < len(handle.waypoints):
+            nxt = handle.waypoints[handle.arrived_index + 1]
+            if dist2d(live_xy, nxt) <= self.arrival_radius:
+                handle.arrived_index += 1
+                changed = True
+            else:
+                break
+        return changed
+
     def _step_covering(self, now):
         """Stream each active drone's absolute position reference, sliding
         along its own ㄹ path at `cruise_speed` (arc-length parameterized) --
         see module docstring for why this replaces discrete per-cell go_to
         calls. Each drone advances completely independently of the others.
+        Progress (for GCS "visited cell" painting) is derived separately,
+        from live measured position -- see _advance_arrived_index_by_position.
         """
         progress_changed = False
         for handle in self.drones.values():
             if handle.done:
+                if self._advance_arrived_index_by_position(handle):
+                    progress_changed = True
                 continue
             elapsed = now - handle.covering_start_time
             target_dist = elapsed * self.cruise_speed
@@ -459,9 +481,7 @@ class ControlNode(Node):
             ref_xy = self._interpolate_path(handle.waypoints, handle.cum_dist, target_dist)
             handle.send_cmd_full_state(ref_xy, self.cruise_altitude)
 
-            idx = self._reached_index(handle.cum_dist, target_dist)
-            if idx > handle.arrived_index:
-                handle.arrived_index = idx
+            if self._advance_arrived_index_by_position(handle):
                 progress_changed = True
 
         if progress_changed:

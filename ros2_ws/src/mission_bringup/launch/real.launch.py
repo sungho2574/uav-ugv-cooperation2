@@ -14,11 +14,17 @@ here. Also NOTE: fill in each AI-deck's actual WiFi AP IP address in
 mission_bringup/config/ai_deck_ips.yaml, and calibrate
 cf_perception/config/camera_intrinsics.yaml before trusting marker detections.
 
-IMPORTANT: `initial_position` is auto-computed as the first cell of each
-drone's own assigned zone (same computation control_node itself runs -- see
+IMPORTANT: each drone's home/spawn point is auto-computed as the first cell
+of its own assigned zone (same computation control_node itself runs -- see
 _compute_homes below), but on real hardware YOU still have to physically
 place each Crazyflie at that exact spot before launch -- unlike sim, nothing
-here moves the physical drone there.
+here moves the physical drone there. _generate_crazyflies_yaml pushes that
+same point into each drone's onboard kalman filter as its initial position
+(kalman.initialX/Y/Z + resetEstimation) so its own position estimate starts
+out matching where you actually put it -- crazyswarm2's real backend does
+NOT do this automatically from `initial_position` the way the sim backend
+does, so without this every real drone would think it starts at (0,0,0)
+regardless of where it was placed.
 """
 import os
 import tempfile
@@ -62,10 +68,37 @@ def _compute_homes(mission_map, drone_ids):
 
 
 def _generate_crazyflies_yaml(crazyflies_cfg, homes, base_crazyflies_path):
-    """Same injection as sim.launch.py -- see there for why."""
+    """Same `initial_position` injection as sim.launch.py, PLUS (real-only,
+    hence not shared with sim.launch.py) seeding each drone's onboard kalman
+    position estimate to match wherever it's actually been placed.
+
+    Unlike the sim backend, crazyswarm2's real (cflib) backend never reads
+    `initial_position` at all -- it's declared but unused there, so every
+    real Crazyflie's kalman filter boots assuming it's at world (0,0,0)
+    regardless of physical placement. Without mocap (mocap:=False here),
+    there's no external position source to correct that, so a mission that
+    physically staged 3 drones at their 3 different zone-start cells would
+    otherwise have all 3 report/believe they're at the same origin.
+
+    The fix is the standard no-mocap Crazyflie technique: push
+    kalman.initialX/Y/Z (the physical spot the drone was placed at) then
+    kalman.resetEstimation=1 as per-robot firmware_params -- crazyswarm2
+    already applies `robots.<id>.firmware_params` on connect (see
+    crazyflie_server.py's _init_parameters, which takes per-robot values
+    over robot_types/all), in TOC-sorted param-name order within a group,
+    which happens to sort resetEstimation after the three initial* values --
+    so this doesn't need any new code upstream, just this config.
+    """
     for drone_id, (x, y) in homes.items():
         if drone_id in crazyflies_cfg.get('robots', {}):
-            crazyflies_cfg['robots'][drone_id]['initial_position'] = [x, y, 0.0]
+            robot_cfg = crazyflies_cfg['robots'][drone_id]
+            robot_cfg['initial_position'] = [x, y, 0.0]
+            firmware_params = robot_cfg.setdefault('firmware_params', {})
+            kalman_params = firmware_params.setdefault('kalman', {})
+            kalman_params['initialX'] = x
+            kalman_params['initialY'] = y
+            kalman_params['initialZ'] = 0.0
+            kalman_params['resetEstimation'] = 1
 
     fd, generated_path = tempfile.mkstemp(prefix='crazyflies_generated_', suffix='.yaml')
     with os.fdopen(fd, 'w') as f:

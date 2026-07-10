@@ -1,0 +1,12 @@
+# AI-deck WiFi AP IP address per drone, keyed by the same drone id used in
+# mission_map.yaml/crazyflies.yaml. Each AI-deck runs its own WiFi access
+# point (see the AI-deck WiFi streamer example app) that real_perception_node
+# connects to as a TCP client on `wifi_port` (real.launch.py) to pull video.
+# Find each one's AP IP from the AI-deck's own serial/console output or
+# router admin page after powering it on -- it's whatever that AI-deck's
+# access point is configured to hand out (commonly 192.168.4.1 by default,
+# which only works for a single drone unless each AI-deck's AP is
+# reconfigured to a distinct subnet/IP).
+cf1: "192.168.4.1"
+cf2: "192.168.4.2"
+cf3: "192.168.4.3"

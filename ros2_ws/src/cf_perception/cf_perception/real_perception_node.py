@@ -101,14 +101,23 @@ class ArucoDetector:
         self.detector = cv2.aruco.ArucoDetector(aruco_dict, params)
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
+        self.marker_size_m = marker_size_m
         half = marker_size_m / 2.0
         self.obj_pts = np.array([
             [-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0],
         ], dtype=np.float32)
 
-    def detect(self, frame_bgr):
+    def detect_raw(self, frame_bgr):
+        """Plain marker detection (corners + ids), no pose solve yet -- used
+        so the overlay can show every marker the detector sees even if its
+        solvePnP later gets rejected (e.g. too far away)."""
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
+        return corners, ids
+
+    def solve_poses(self, corners, ids):
+        """Per-marker solvePnP -> world-usable results, filtering out
+        implausible ranges (marker seen but too far/degenerate pose)."""
         results = []
         if ids is None:
             return results
@@ -119,8 +128,20 @@ class ArucoDetector:
                 flags=cv2.SOLVEPNP_IPPE_SQUARE)
             if not ok or np.linalg.norm(tvec) > 8.0:
                 continue
-            results.append({'id': int(ids[i][0]), 'tvec': tvec.flatten()})
+            results.append({'id': int(ids[i][0]), 'tvec': tvec.flatten(), 'rvec': rvec})
         return results
+
+    def draw_overlay(self, frame_bgr, corners, ids, poses):
+        """Mutates frame_bgr in place: marker outline+id for every detected
+        marker, plus a pose axis for whichever ones had a valid solvePnP."""
+        if ids is None:
+            return
+        cv2.aruco.drawDetectedMarkers(frame_bgr, corners, ids)
+        axis_len = self.marker_size_m / 2.0
+        for pose in poses:
+            cv2.drawFrameAxes(
+                frame_bgr, self.camera_matrix, self.dist_coeffs,
+                pose['rvec'], pose['tvec'], axis_len)
 
 
 def marker_to_world(tvec, drone_x, drone_y, drone_z, yaw_rad):
@@ -173,17 +194,25 @@ class DroneLink:
                 continue
             now = time.time()
 
-            detections = self.detector.detect(frame)
-            if detections and self.latest_pose is not None:
+            corners, ids = self.detector.detect_raw(frame)
+            poses = self.detector.solve_poses(corners, ids)
+            # Overlay every marker the detector saw (box + id), plus a pose
+            # axis for the ones with a usable solvePnP -- drawn in place so
+            # the published image always reflects what's on camera, whether
+            # or not that detection was good enough to also emit a
+            # /detections world-coordinate report below.
+            self.detector.draw_overlay(frame, corners, ids, poses)
+
+            if poses and self.latest_pose is not None:
                 px, py, pz, pyaw, pose_stamp = self.latest_pose
                 if abs(now - pose_stamp) < self.POSE_SYNC_TOLERANCE_SEC:
-                    for det in detections:
-                        wx, wy, wz = marker_to_world(det['tvec'], px, py, pz, pyaw)
+                    for pose in poses:
+                        wx, wy, wz = marker_to_world(pose['tvec'], px, py, pz, pyaw)
                         msg = MarkerDetection()
                         msg.header.frame_id = 'map'
                         msg.header.stamp = self.node.get_clock().now().to_msg()
                         msg.drone_id = self.drone_id
-                        msg.marker_id = det['id']
+                        msg.marker_id = pose['id']
                         msg.position.x = wx
                         msg.position.y = wy
                         msg.position.z = wz

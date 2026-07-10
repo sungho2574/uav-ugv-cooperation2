@@ -10,9 +10,9 @@ NOTE: `mocap` is left False, i.e. drones fly on their own onboard state
 estimate over radio (no external motion-capture / lighthouse positioning).
 Position will drift over time on real hardware without an external position
 source -- that is a real limitation of this baseline, not something solved
-here. Also NOTE: wifi_ips below are placeholders -- set them to each AI-deck's
-actual WiFi AP IP address, and calibrate cf_perception/config/camera_intrinsics.yaml
-before trusting marker detections.
+here. Also NOTE: fill in each AI-deck's actual WiFi AP IP address in
+mission_bringup/config/ai_deck_ips.yaml, and calibrate
+cf_perception/config/camera_intrinsics.yaml before trusting marker detections.
 
 IMPORTANT: `initial_position` is auto-computed as the first cell of each
 drone's own assigned zone (same computation control_node itself runs -- see
@@ -72,6 +72,7 @@ def _build(context, *args, **kwargs):
     perception_share = get_package_share_directory('cf_perception')
     mission_map_path = os.path.join(bringup_share, 'config', 'mission_map.yaml')
     base_crazyflies_path = os.path.join(bringup_share, 'config', 'crazyflies.yaml')
+    ai_deck_ips_path = os.path.join(bringup_share, 'config', 'ai_deck_ips.yaml')
     camera_intrinsics_path = os.path.join(
         perception_share, 'config', 'camera_intrinsics.yaml')
 
@@ -80,8 +81,15 @@ def _build(context, *args, **kwargs):
     homes = _compute_homes(mission_map)
     generated_crazyflies_path = _generate_crazyflies_yaml(homes, base_crazyflies_path)
     drone_ids = [d['id'] for d in mission_map['drones']]
-    # TODO: replace with each AI-deck's actual WiFi AP IP address.
-    wifi_ips = ['192.168.4.1', '192.168.4.2', '192.168.4.3']
+
+    with open(ai_deck_ips_path, 'r') as f:
+        ai_deck_ips = yaml.safe_load(f)
+    missing = [d for d in drone_ids if d not in ai_deck_ips]
+    if missing:
+        raise RuntimeError(
+            f'ai_deck_ips.yaml is missing an entry for: {missing} -- add each '
+            "drone's AI-deck WiFi AP IP there before launching on real hardware")
+    wifi_ips = [ai_deck_ips[d] for d in drone_ids]
 
     crazyswarm2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(

@@ -323,8 +323,11 @@ class ControlNode(Node):
 
     def _do_decompose(self):
         boundary = [tuple(p) for p in self.mission_map['boundary']]
+        # `or []` (not just `.get(..., [])`): a bare `dead_zones:` key with
+        # nothing under it parses to None in YAML, which isn't caught by the
+        # dict default and would crash the comprehension below.
         dead_zones = [
-            [tuple(p) for p in dz['points']] for dz in self.mission_map.get('dead_zones', [])
+            [tuple(p) for p in dz['points']] for dz in (self.mission_map.get('dead_zones') or [])
         ]
         cells = build_cells(
             boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)

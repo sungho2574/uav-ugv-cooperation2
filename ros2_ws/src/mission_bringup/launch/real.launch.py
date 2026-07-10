@@ -49,7 +49,8 @@ def _enabled_drone_ids(crazyflies_cfg):
 def _compute_homes(mission_map, drone_ids):
     """Same computation as sim.launch.py -- see there for why."""
     boundary = [tuple(p) for p in mission_map['boundary']]
-    dead_zones = [[tuple(p) for p in dz['points']] for dz in mission_map.get('dead_zones', [])]
+    # See sim.launch.py for why `or []` (not just `.get(..., [])`) is needed.
+    dead_zones = [[tuple(p) for p in dz['points']] for dz in (mission_map.get('dead_zones') or [])]
     cells = build_cells(
         boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
     zone_cells = assign_cells_to_drones(cells, drone_ids)

@@ -150,7 +150,9 @@ class GcsNode(Node):
             data = yaml.safe_load(f)
         return {
             'boundary': data.get('boundary', []),
-            'dead_zones': [dz.get('points', []) for dz in data.get('dead_zones', [])],
+            # `or []`: a bare `dead_zones:` key with nothing under it parses
+            # to None in YAML, which `.get(..., [])`'s default doesn't catch.
+            'dead_zones': [dz.get('points', []) for dz in (data.get('dead_zones') or [])],
             'coverage_line_spacing': data.get('coverage_line_spacing', 0.5),
         }
 

@@ -4,14 +4,25 @@
 Single rclpy.Node that owns the whole mission from a cold start to landing:
 loads the known mission map, splits it into 3 zones (one per drone), plans a
 boustrophedon coverage path per zone, drives the 3 Crazyflies through
-crazyswarm2's per-drone services directly (no action servers exist in
-crazyswarm2 -- takeoff/land/go_to are fire-and-forget services), collects
-ArUco detections published by whichever cf_perception node is running
-(sim or real, same topic contract), and publishes the final marker list for
-the (future) UGV routing node to consume.
+crazyswarm2, collects ArUco detections published by whichever cf_perception
+node is running (sim or real, same topic contract), and publishes the final
+marker list for the (future) UGV routing node to consume.
+
+Coverage (the ㄹ-shape sweep) is flown as a single continuously-advancing
+*streamed* position reference (crazyflie_interfaces/FullState on
+/cfN/cmd_full_state) rather than a sequence of discrete go_to calls -- go_to
+plans a smooth stop-to-stop trajectory for each leg (zero velocity at both
+ends), so chaining many of them one per grid cell means literally
+decelerating to a stop at every single cell before accelerating into the
+next leg. Streaming a position that keeps sliding along the whole path at
+cruise_speed (arc-length parameterized, see _interpolate_path) removes that
+stop-and-go behavior entirely: takeoff/land/return-home still use the
+high-level services (fire-and-forget, no action servers exist in
+crazyswarm2), but coverage is a moving target the onboard/sim controller
+tracks continuously.
 
 Runs as a single non-blocking timer-driven FSM so that the /detections
-subscriber keeps getting serviced while legs are "in flight" -- no blocking
+subscriber keeps getting serviced while the drones are moving -- no blocking
 sleeps anywhere in this node.
 """
 import math
@@ -23,7 +34,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
 from builtin_interfaces.msg import Duration as DurationMsg
-from crazyflie_interfaces.srv import GoTo, Land, Takeoff
+from crazyflie_interfaces.msg import FullState
+from crazyflie_interfaces.srv import GoTo, Land, NotifySetpointsStop, Takeoff
 from geometry_msgs.msg import Point, Point32
 from geometry_msgs.msg import Polygon as PolygonMsg
 from geometry_msgs.msg import PoseStamped
@@ -59,9 +71,10 @@ def dist2d(a, b):
 
 
 class DroneHandle:
-    """Per-drone crazyswarm2 service clients + coverage-following state."""
+    """Per-drone crazyswarm2 clients + coverage-following state."""
 
     def __init__(self, node, drone_id, home_position, home_yaw):
+        self.node = node
         self.drone_id = drone_id
         self.home_position = home_position  # [x, y, z]
         self.home_yaw = home_yaw
@@ -69,22 +82,23 @@ class DroneHandle:
         self.takeoff_client = node.create_client(Takeoff, prefix + '/takeoff')
         self.land_client = node.create_client(Land, prefix + '/land')
         self.go_to_client = node.create_client(GoTo, prefix + '/go_to')
+        self.notify_setpoints_stop_client = node.create_client(
+            NotifySetpointsStop, prefix + '/notify_setpoints_stop')
+        # Streaming position reference used during COVERING -- see module
+        # docstring for why this replaces per-cell go_to calls.
+        self.cmd_full_state_pub = node.create_publisher(FullState, prefix + '/cmd_full_state', 1)
 
         self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
-        # arrived_index: last waypoint the drone has actually finished flying to
-        # (index 0 == home, true immediately -- see plan_coverage). pending_index/
-        # pending_target_xy: the waypoint it's currently in flight toward.
-        # arrived_index is only promoted once the *measured* position (/states)
-        # is actually within arrival_radius of pending_target_xy (leg_deadline is
-        # just a fallback timeout for when telemetry is missing/stale) --
-        # otherwise the GCS paints a cell as visited (and, worse, looks done
-        # before /detections even has a chance to fire) purely because our
-        # duration *estimate* elapsed, regardless of whether the drone is
-        # actually there yet.
+        self.cum_dist = [0.0]  # cum_dist[i] = arc length from waypoints[0] to waypoints[i]
+        self.covering_start_time = None
+        # arrived_index: furthest waypoint the *commanded* streaming reference
+        # has reached so far (see ControlNode._step_covering) -- since that
+        # reference advances continuously and monotonically along the path
+        # and the drone tracks it closely, this is a simple, robust "visited"
+        # signal without needing to reconcile against live measured position
+        # on a zig-zag path (which is ambiguous: many cells can be spatially
+        # close to the current position without being "next").
         self.arrived_index = 0
-        self.pending_index = 0
-        self.pending_target_xy = (home_position[0], home_position[1])
-        self.leg_deadline = None
         self.done = False
         self.last_target_xy = (home_position[0], home_position[1])
 
@@ -93,6 +107,7 @@ class DroneHandle:
             (self.takeoff_client, 'takeoff'),
             (self.land_client, 'land'),
             (self.go_to_client, 'go_to'),
+            (self.notify_setpoints_stop_client, 'notify_setpoints_stop'),
         ):
             if not client.wait_for_service(timeout_sec=timeout_sec):
                 node.get_logger().warn(
@@ -123,6 +138,30 @@ class DroneHandle:
         self.go_to_client.call_async(req)
         self.last_target_xy = (xyz[0], xyz[1])
 
+    def send_cmd_full_state(self, xy, z):
+        """Stream an absolute position reference (velocity/acceleration left at
+        zero -- position error alone is enough for the onboard/sim controller
+        to track a slowly, continuously moving target; see module docstring).
+        """
+        msg = FullState()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.pose.position.x = float(xy[0])
+        msg.pose.position.y = float(xy[1])
+        msg.pose.position.z = float(z)
+        msg.pose.orientation.w = 1.0  # identity quaternion -- no yaw control
+        self.cmd_full_state_pub.publish(msg)
+        self.last_target_xy = (xy[0], xy[1])
+
+    def send_notify_setpoints_stop(self, remain_valid_millisecs=100):
+        """Tell the firmware/sim streaming setpoints are ending, so it reverts
+        to high-level command mode -- required before go_to()/land() will work
+        again after cmd_full_state streaming (crazyswarm2 API contract)."""
+        req = NotifySetpointsStop.Request()
+        req.group_mask = 0
+        req.remain_valid_millisecs = remain_valid_millisecs
+        self.notify_setpoints_stop_client.call_async(req)
+
 
 class ControlNode(Node):
 
@@ -139,7 +178,6 @@ class ControlNode(Node):
         self.declare_parameter('land_settle_time', 3.0)
         self.declare_parameter('start_immediately', False)
         self.declare_parameter('dead_zone_margin', 0.15)
-        self.declare_parameter('arrival_radius', 0.1)
 
         self.cruise_speed = self.get_parameter('cruise_speed').value
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
@@ -149,7 +187,6 @@ class ControlNode(Node):
         self.land_duration = self.get_parameter('land_duration').value
         self.land_settle_time = self.get_parameter('land_settle_time').value
         self.dead_zone_margin = self.get_parameter('dead_zone_margin').value
-        self.arrival_radius = self.get_parameter('arrival_radius').value
 
         mission_map_path = self.get_parameter('mission_map_path').value
         if not mission_map_path:
@@ -278,6 +315,16 @@ class ControlNode(Node):
             boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
         self.zone_cells = assign_cells_to_drones(cells, drone_ids)
 
+    @staticmethod
+    def _build_cum_dist(waypoints):
+        """cum_dist[i] = arc length walked along the path from waypoints[0] to
+        waypoints[i] -- lets _step_covering turn "elapsed time x cruise_speed"
+        into a position along the whole ㄹ path with a simple lookup/interp."""
+        cum = [0.0]
+        for i in range(1, len(waypoints)):
+            cum.append(cum[-1] + dist2d(waypoints[i - 1], waypoints[i]))
+        return cum
+
     def _do_plan(self):
         # Home is *derived from* the assigned zone (its first cell), not the
         # other way around -- a drone assigned to the 3rd region should spawn
@@ -290,8 +337,8 @@ class ControlNode(Node):
                 home_xy = handle.waypoints[0]
                 handle.home_position = (home_xy[0], home_xy[1], 0.0)
                 handle.last_target_xy = home_xy
+            handle.cum_dist = self._build_cum_dist(handle.waypoints)
             handle.arrived_index = 0
-            handle.pending_index = 0
             handle.done = len(handle.waypoints) <= 1  # index 0 is home itself, nothing to fly
 
     def _publish_plan(self):
@@ -348,33 +395,38 @@ class ControlNode(Node):
     def _init_covering(self):
         now = time.monotonic()
         for handle in self.drones.values():
+            handle.covering_start_time = now
             handle.arrived_index = 0
-            handle.pending_index = 0
-            handle.pending_target_xy = (handle.home_position[0], handle.home_position[1])
-            handle.leg_deadline = None
             handle.done = len(handle.waypoints) <= 1
             handle.last_target_xy = (handle.home_position[0], handle.home_position[1])
-            if not handle.done:
-                self._send_next_leg(handle, now)
         self._publish_progress()
 
-    def _send_next_leg(self, handle, now):
-        """Command `handle` toward its next waypoint. Each drone advances
-        independently of the others -- there is no shared "wait for everyone"
-        gate, since crazyswarm2 already flies each drone's go_to independently."""
-        next_idx = handle.arrived_index + 1
-        if next_idx >= len(handle.waypoints):
-            handle.done = True
-            return
-        target_xy = handle.waypoints[next_idx]
-        current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
-        leg_dist = dist2d(current_xy, target_xy)
-        duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
-        handle.send_go_to((target_xy[0], target_xy[1], self.cruise_altitude), 0.0, duration)
-        handle.last_target_xy = target_xy
-        handle.pending_index = next_idx
-        handle.pending_target_xy = target_xy
-        handle.leg_deadline = now + duration + self.leg_settle_margin
+    @staticmethod
+    def _interpolate_path(waypoints, cum_dist, target_dist):
+        """Position `target_dist` meters along the polyline `waypoints`."""
+        if target_dist <= 0.0:
+            return waypoints[0]
+        if target_dist >= cum_dist[-1]:
+            return waypoints[-1]
+        for i in range(1, len(cum_dist)):
+            if cum_dist[i] >= target_dist:
+                seg_len = cum_dist[i] - cum_dist[i - 1]
+                t = 0.0 if seg_len <= 1e-9 else (target_dist - cum_dist[i - 1]) / seg_len
+                x0, y0 = waypoints[i - 1]
+                x1, y1 = waypoints[i]
+                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+        return waypoints[-1]
+
+    @staticmethod
+    def _reached_index(cum_dist, target_dist):
+        """Furthest waypoint index whose arc-length position is <= target_dist."""
+        idx = 0
+        for i, d in enumerate(cum_dist):
+            if d <= target_dist:
+                idx = i
+            else:
+                break
+        return idx
 
     def _publish_progress(self):
         array = DroneProgressArray()
@@ -387,37 +439,48 @@ class ControlNode(Node):
         self.progress_pub.publish(array)
 
     def _step_covering(self, now):
-        """Promote arrived_index only once the *measured* position (/states)
-        actually confirms the drone is within arrival_radius of its current
-        target -- not just because our estimated leg duration elapsed. An
-        estimate-only timer marked "arrived" (and painted the GCS cell/tube)
-        before the drone had actually gotten there whenever the real flight
-        ran a bit slower than the distance/cruise_speed estimate; the
-        per-drone `leg_deadline` is kept only as a fallback in case telemetry
-        is missing or stale, so a drone can't stall forever.
+        """Stream each active drone's absolute position reference, sliding
+        along its own ㄹ path at `cruise_speed` (arc-length parameterized) --
+        see module docstring for why this replaces discrete per-cell go_to
+        calls. Each drone advances completely independently of the others.
         """
         progress_changed = False
         for handle in self.drones.values():
             if handle.done:
                 continue
-            current_xy = self.live_xy.get(handle.drone_id)
-            arrived = (
-                current_xy is not None
-                and dist2d(current_xy, handle.pending_target_xy) <= self.arrival_radius)
-            timed_out = handle.leg_deadline is not None and now >= handle.leg_deadline
-            if arrived or timed_out:
-                handle.arrived_index = handle.pending_index
+            elapsed = now - handle.covering_start_time
+            target_dist = elapsed * self.cruise_speed
+            total_dist = handle.cum_dist[-1]
+            if target_dist >= total_dist:
+                target_dist = total_dist
+                handle.done = True
+                handle.send_notify_setpoints_stop()  # hand back to high-level mode
+
+            ref_xy = self._interpolate_path(handle.waypoints, handle.cum_dist, target_dist)
+            handle.send_cmd_full_state(ref_xy, self.cruise_altitude)
+
+            idx = self._reached_index(handle.cum_dist, target_dist)
+            if idx > handle.arrived_index:
+                handle.arrived_index = idx
                 progress_changed = True
-                self._send_next_leg(handle, now)
 
         if progress_changed:
             self._publish_progress()
 
         if all(handle.done for handle in self.drones.values()):
             self._returning_sent = False
+            # notify_setpoints_stop() needs a moment to actually take effect
+            # before go_to() will be accepted again -- see _step_return_home.
+            self._return_home_not_before = now + 0.2
             self._set_state('RETURN_HOME')
 
     def _step_return_home(self, now):
+        # Give notify_setpoints_stop() (sent as each drone finished its
+        # streamed coverage sweep) a brief moment to actually take effect --
+        # go_to() is a high-level command and won't be honored until the
+        # firmware/sim has reverted out of streaming-setpoint mode.
+        if now < getattr(self, '_return_home_not_before', 0.0):
+            return
         if not getattr(self, '_returning_sent', False):
             max_duration = 0.0
             for handle in self.drones.values():

@@ -54,7 +54,7 @@ def rx_bytes(sock, size):
     return data
 
 
-def receive_frame(sock):
+def receive_frame(sock, logger=None):
     """Receive one AI-deck WiFi frame. Returns a BGR numpy array or None."""
     packet_info = rx_bytes(sock, 4)
     length, _routing, _function = struct.unpack('<HBB', packet_info)
@@ -62,6 +62,12 @@ def receive_frame(sock):
     img_header = rx_bytes(sock, length - 2)
     magic, width, height, _depth, fmt, size = struct.unpack('<BHHBBI', img_header)
     if magic != 0xBC:
+        # Framing is off (this wasn't actually an image header) -- silently
+        # returning None here used to look identical to "no image yet",
+        # which is exactly what made a real protocol mismatch invisible.
+        if logger is not None:
+            logger.warn(f'unexpected magic byte 0x{magic:02x} (expected 0xbc) -- '
+                        'AI-deck WiFi stream framing looks wrong')
         return None
 
     img_stream = bytearray()
@@ -88,7 +94,15 @@ def try_connect(ip, port, timeout=2.0):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((ip, port))
-        s.settimeout(None)
+        # Deliberately NOT settimeout(None) here: a fully blocking socket
+        # means a deck that connects but never actually streams anything
+        # (wrong firmware/example flashed, camera not initialized, etc.)
+        # hangs receive_frame forever with zero errors or logs -- the TCP
+        # handshake alone was already enough to make the GCS "WiFi" badge
+        # show connected, so that silent hang looked identical to "working
+        # but idle". A read timeout turns that into a periodic, visible
+        # reconnect-with-a-log-message instead.
+        s.settimeout(5.0)
         return s
     except OSError:
         return None
@@ -196,8 +210,16 @@ class DroneLink:
                 time.sleep(3.0)
                 continue
             self.wifi_connected = True
+            self.node.get_logger().info(
+                f'{self.drone_id} wifi connected to {self.wifi_ip}:{self.wifi_port}, '
+                'waiting for frames...')
             try:
                 self._process_frames(sock)
+            except socket.timeout:
+                self.node.get_logger().warn(
+                    f'{self.drone_id} wifi connected but received nothing for 5s -- '
+                    'TCP link is up but the AI-deck does not seem to be streaming '
+                    '(wrong example/firmware flashed, camera not initialized, etc.)')
             except Exception as exc:
                 self.node.get_logger().warn(f'{self.drone_id} wifi link dropped: {exc}')
             finally:
@@ -206,11 +228,18 @@ class DroneLink:
             time.sleep(1.0)
 
     def _process_frames(self, sock):
+        frame_count = 0
         while rclpy.ok():
-            frame = receive_frame(sock)
+            frame = receive_frame(sock, logger=self.node.get_logger())
             if frame is None:
                 continue
             now = time.time()
+            frame_count += 1
+            if frame_count == 1:
+                self.node.get_logger().info(
+                    f'{self.drone_id} first frame received ({frame.shape[1]}x{frame.shape[0]})')
+            elif frame_count % 100 == 0:
+                self.node.get_logger().info(f'{self.drone_id} {frame_count} frames received so far')
 
             corners, ids = self.detector.detect_raw(frame)
             poses = self.detector.solve_poses(corners, ids)

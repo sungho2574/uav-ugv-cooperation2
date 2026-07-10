@@ -3,7 +3,7 @@
 1. 플래시 (부트로더 모드 필요 없음!)
 
    ```bash
-   cfloader flash aideck_gap8.bin deck-bcAI:gap8-fw -w radio://0/80/2M/E7E7E7E7E8
+   cfloader flash aideck_gap8_jh_hotspot.bin deck-bcAI:gap8-fw -w radio://0/80/2M/E7E7E7E7E8
    ```
 
 2. 노트북을 같은 와이파이에 연결

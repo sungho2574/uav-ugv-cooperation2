@@ -186,7 +186,11 @@ class GcsNode(Node):
 
     def _on_progress(self, msg: DroneProgressArray):
         progress = {
-            p.drone_id: {'waypoint_index': p.waypoint_index, 'total_waypoints': p.total_waypoints}
+            p.drone_id: {
+                'waypoint_index': p.waypoint_index,
+                'total_waypoints': p.total_waypoints,
+                'visited_indices': list(p.visited_indices),
+            }
             for p in msg.progress
         }
         self.shared.set_progress(progress)

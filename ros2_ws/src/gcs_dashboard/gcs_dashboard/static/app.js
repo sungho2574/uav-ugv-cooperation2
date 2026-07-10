@@ -481,14 +481,25 @@ function main() {
       (state.zones || []).forEach((z) => { zoneColors[z.drone_id] = z.color; });
 
       // Which cell-center points has each drone actually reached, per the
-      // authoritative /mission/progress waypoint_index -- feeds setZones'
+      // authoritative /mission/progress visited_indices -- feeds setZones'
       // "darken the cells actually visited" and is derived fresh every poll
       // (cheap: just string keys, no THREE.js objects involved).
+      // Uses the exact visited-index set (not a waypoint_index prefix): the
+      // backend checks every remaining cell independently each tick, so a
+      // corner-cut miss on one cell no longer blocks every later cell from
+      // being marked visited -- a prefix slice here would silently undo
+      // that fix by re-imposing the "all-or-nothing up to N" assumption.
       const visitedByDrone = {};
       Object.entries(state.paths || {}).forEach(([droneId, wps]) => {
-        const idx = (state.progress && state.progress[droneId] && state.progress[droneId].waypoint_index) || 0;
+        const visitedIndices = (state.progress && state.progress[droneId] &&
+          state.progress[droneId].visited_indices) || [];
         const set = new Set();
-        wps.slice(0, Math.min(wps.length, idx + 1)).forEach(([x, y]) => set.add(`${x.toFixed(3)},${y.toFixed(3)}`));
+        visitedIndices.forEach((idx) => {
+          if (idx >= 0 && idx < wps.length) {
+            const [x, y] = wps[idx];
+            set.add(`${x.toFixed(3)},${y.toFixed(3)}`);
+          }
+        });
         visitedByDrone[droneId] = set;
       });
 

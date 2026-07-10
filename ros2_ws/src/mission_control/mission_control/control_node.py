@@ -91,14 +91,18 @@ class DroneHandle:
         self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
         self.cum_dist = [0.0]  # cum_dist[i] = arc length from waypoints[0] to waypoints[i]
         self.covering_start_time = None
-        # arrived_index: furthest waypoint the drone's *live measured*
-        # position has actually reached (see
-        # ControlNode._advance_arrived_index_by_position). Only ever walked
-        # forward from the current index, one waypoint at a time, so a
-        # zig-zag path's spatial ambiguity (many cells can be close to the
-        # current position without being "next") doesn't matter -- it can
-        # only advance to the immediate next unvisited waypoint in path
-        # order, never jump ahead.
+        # visited_mask: set of waypoint indices whose cell the drone's *live
+        # measured* position has actually come within arrival_radius of --
+        # checked independently against every remaining waypoint each tick
+        # (see ControlNode._update_visited_cells), not just the next one in
+        # path order. That independence matters: if the drone cuts a corner
+        # and never gets close enough to one cell, later cells still get
+        # marked visited normally instead of being permanently blocked.
+        self.visited_mask = set()
+        # arrived_index: highwater mark (max visited index so far) -- used
+        # for the "swept so far" tube/progress-bar display, where a
+        # monotonic contiguous number is what's wanted even if visited_mask
+        # itself has a gap.
         self.arrived_index = 0
         self.done = False
         self.last_target_xy = (home_position[0], home_position[1])
@@ -400,6 +404,7 @@ class ControlNode(Node):
         for handle in self.drones.values():
             handle.covering_start_time = now
             handle.arrived_index = 0
+            handle.visited_mask = set()
             handle.done = len(handle.waypoints) <= 1
             handle.last_target_xy = (handle.home_position[0], handle.home_position[1])
         self._publish_progress()
@@ -427,11 +432,12 @@ class ControlNode(Node):
                 drone_id=handle.drone_id,
                 waypoint_index=handle.arrived_index,
                 total_waypoints=len(handle.waypoints),
+                visited_indices=sorted(handle.visited_mask),
             ))
         self.progress_pub.publish(array)
 
-    def _advance_arrived_index_by_position(self, handle):
-        """Advance arrived_index using the drone's *live measured* position
+    def _update_visited_cells(self, handle):
+        """Mark cells visited using the drone's *live measured* position
         (self.live_xy, from /states), not the commanded streaming reference.
 
         The reference in _step_covering slides continuously regardless of
@@ -442,18 +448,24 @@ class ControlNode(Node):
         what caused the earlier understeer/corner-cutting issue), gating
         *only the progress readout* on real position is now safe: it can't
         stall the reference, it just reports true visited cells.
+
+        Every not-yet-visited waypoint is checked each tick (not just the
+        next one in path order) so that cutting a corner and missing one
+        cell doesn't permanently block every later cell from being marked
+        visited -- only that one cell stays unvisited.
         """
         live_xy = self.live_xy.get(handle.drone_id)
         if live_xy is None:
             return False
         changed = False
-        while handle.arrived_index + 1 < len(handle.waypoints):
-            nxt = handle.waypoints[handle.arrived_index + 1]
-            if dist2d(live_xy, nxt) <= self.arrival_radius:
-                handle.arrived_index += 1
+        for idx, wp in enumerate(handle.waypoints):
+            if idx in handle.visited_mask:
+                continue
+            if dist2d(live_xy, wp) <= self.arrival_radius:
+                handle.visited_mask.add(idx)
+                if idx > handle.arrived_index:
+                    handle.arrived_index = idx
                 changed = True
-            else:
-                break
         return changed
 
     def _step_covering(self, now):
@@ -462,12 +474,12 @@ class ControlNode(Node):
         see module docstring for why this replaces discrete per-cell go_to
         calls. Each drone advances completely independently of the others.
         Progress (for GCS "visited cell" painting) is derived separately,
-        from live measured position -- see _advance_arrived_index_by_position.
+        from live measured position -- see _update_visited_cells.
         """
         progress_changed = False
         for handle in self.drones.values():
             if handle.done:
-                if self._advance_arrived_index_by_position(handle):
+                if self._update_visited_cells(handle):
                     progress_changed = True
                 continue
             elapsed = now - handle.covering_start_time
@@ -481,7 +493,7 @@ class ControlNode(Node):
             ref_xy = self._interpolate_path(handle.waypoints, handle.cum_dist, target_dist)
             handle.send_cmd_full_state(ref_xy, self.cruise_altitude)
 
-            if self._advance_arrived_index_by_position(handle):
+            if self._update_visited_cells(handle):
                 progress_changed = True
 
         if progress_changed:

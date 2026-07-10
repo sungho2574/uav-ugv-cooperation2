@@ -5,7 +5,11 @@ Same /states and /detections topic contract as sim_perception_node.py, but
 position comes from crazyswarm2's real backend (/cfN/pose, populated over
 radio -- we don't parse radio telemetry ourselves) and marker detections come
 from actually running ArUco on AI-deck video instead of checking a
-ground-truth file.
+ground-truth file. Also publishes /mission/link_status (real-only, no sim
+equivalent): per-drone radio/WiFi connectivity, shown as badges in the GCS
+video panel -- radio connectivity is inferred from /cfN/pose staleness since
+crazyswarm2 has no explicit "connected" boolean topic, WiFi connectivity
+comes straight from DroneLink's socket state.
 
 The WiFi frame protocol (rx_bytes/receive_frame/try_connect, magic byte 0xBC)
 and the camera->body rotation assumption are carried over verbatim from the
@@ -25,7 +29,7 @@ from rclpy.node import Node
 
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
-from mission_interfaces.msg import DroneState, MarkerDetection
+from mission_interfaces.msg import DroneState, LinkStatus, LinkStatusArray, MarkerDetection
 from sensor_msgs.msg import Image
 
 # Reused from uav-ugv-cooperation/dashboard/dashboard_aruco.py: assumes the AI-deck
@@ -157,6 +161,11 @@ class DroneLink:
     """One WiFi video connection + ArUco pipeline for a single drone."""
 
     POSE_SYNC_TOLERANCE_SEC = 0.2
+    # /cfN/pose streams at firmware_logging's configured pose frequency
+    # (10Hz in crazyflies.yaml) whenever the radio link is actually up --
+    # crazyswarm2 doesn't publish an explicit "radio connected" boolean, so
+    # this node infers it from how stale the last received pose is instead.
+    RADIO_STALE_SEC = 1.0
 
     def __init__(self, node, drone_id, wifi_ip, wifi_port, detector, bridge):
         self.node = node
@@ -166,6 +175,7 @@ class DroneLink:
         self.detector = detector
         self.bridge = bridge
         self.latest_pose = None  # (x, y, z, yaw, wall_clock_stamp_sec)
+        self.wifi_connected = False  # set from the background _run thread
         self.image_pub = node.create_publisher(Image, f'/{drone_id}/image_raw', 5)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -173,17 +183,25 @@ class DroneLink:
     def update_pose(self, x, y, z, yaw, stamp_sec):
         self.latest_pose = (x, y, z, yaw, stamp_sec)
 
+    def radio_connected(self, now):
+        if self.latest_pose is None:
+            return False
+        return (now - self.latest_pose[4]) < self.RADIO_STALE_SEC
+
     def _run(self):
         while rclpy.ok():
             sock = try_connect(self.wifi_ip, self.wifi_port, timeout=3.0)
             if sock is None:
+                self.wifi_connected = False
                 time.sleep(3.0)
                 continue
+            self.wifi_connected = True
             try:
                 self._process_frames(sock)
             except Exception as exc:
                 self.node.get_logger().warn(f'{self.drone_id} wifi link dropped: {exc}')
             finally:
+                self.wifi_connected = False
                 sock.close()
             time.sleep(1.0)
 
@@ -250,6 +268,8 @@ class RealPerceptionNode(Node):
 
         self.states_pub = self.create_publisher(DroneState, '/states', 10)
         self.detections_pub = self.create_publisher(MarkerDetection, '/detections', 10)
+        self.link_status_pub = self.create_publisher(
+            LinkStatusArray, '/mission/link_status', 10)
 
         self.links = {}
         self.pose_subs = []
@@ -259,6 +279,13 @@ class RealPerceptionNode(Node):
             self.pose_subs.append(self.create_subscription(
                 PoseStamped, f'/{drone_id}/pose',
                 self._make_pose_callback(drone_id), 10))
+
+        # Radio connectivity is inferred from pose staleness (see
+        # DroneLink.radio_connected), so it needs to be re-evaluated on a
+        # timer even when no new pose arrives -- a drone that goes silent
+        # should flip to "disconnected" on its own, not just wait for the
+        # next pose message that may never come.
+        self.create_timer(0.5, self._publish_link_status)
 
         self.get_logger().info(
             f'real_perception_node streaming from {list(zip(self.drone_ids, wifi_ips))}')
@@ -300,6 +327,17 @@ class RealPerceptionNode(Node):
             state.yaw = yaw
             self.states_pub.publish(state)
         return callback
+
+    def _publish_link_status(self):
+        now = time.time()
+        array = LinkStatusArray()
+        for drone_id, link in self.links.items():
+            array.status.append(LinkStatus(
+                drone_id=drone_id,
+                radio_connected=link.radio_connected(now),
+                wifi_connected=link.wifi_connected,
+            ))
+        self.link_status_pub.publish(array)
 
 
 def main(args=None):

@@ -18,6 +18,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CoveragePathArray.msg"
   "msg/MarkerRecord.msg"
   "msg/MarkerRecordArray.msg"
+  "msg/LinkStatus.msg"
+  "msg/LinkStatusArray.msg"
   DEPENDENCIES std_msgs geometry_msgs nav_msgs
 )
 

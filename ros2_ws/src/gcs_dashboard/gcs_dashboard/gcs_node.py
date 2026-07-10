@@ -22,7 +22,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
 from mission_interfaces.msg import (
-    CoveragePathArray, DroneProgressArray, DroneState, MarkerDetection, ZoneAssignmentArray)
+    CoveragePathArray, DroneProgressArray, DroneState, LinkStatusArray, MarkerDetection,
+    ZoneAssignmentArray)
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -48,6 +49,12 @@ class SharedState:
         self.progress = {}  # drone_id -> {waypoint_index, total_waypoints}
         self.mission_state = 'UNKNOWN'
         self.frames = {}    # drone_id -> jpeg bytes
+        # drone_id -> {radio_connected, wifi_connected}. Real hardware only
+        # (real_perception_node publishes this; sim_perception_node doesn't,
+        # so this just stays empty in sim -- see SharedState.snapshot, the
+        # frontend already treats "no entry" as unknown/no-signal same as
+        # the video frame itself does).
+        self.link_status = {}
 
     def update_drone(self, drone_id, x, y, z, yaw):
         with self._lock:
@@ -73,6 +80,10 @@ class SharedState:
         with self._lock:
             self.mission_state = text
 
+    def set_link_status(self, link_status):
+        with self._lock:
+            self.link_status = link_status
+
     def update_frame(self, drone_id, jpeg_bytes):
         with self._lock:
             self.frames[drone_id] = jpeg_bytes
@@ -90,6 +101,7 @@ class SharedState:
                 'paths': dict(self.paths),
                 'progress': dict(self.progress),
                 'mission_state': self.mission_state,
+                'link_status': dict(self.link_status),
             }
 
 
@@ -117,6 +129,8 @@ class GcsNode(Node):
             CoveragePathArray, '/mission/coverage_paths', self._on_paths, LATCHED_QOS)
         self.create_subscription(DroneProgressArray, '/mission/progress', self._on_progress, 10)
         self.create_subscription(String, '/mission/state', self._on_mission_state, 10)
+        self.create_subscription(
+            LinkStatusArray, '/mission/link_status', self._on_link_status, 10)
 
         for drone_id in self.drone_ids:
             self.create_subscription(
@@ -197,6 +211,13 @@ class GcsNode(Node):
 
     def _on_mission_state(self, msg: String):
         self.shared.set_mission_state(msg.data)
+
+    def _on_link_status(self, msg: LinkStatusArray):
+        link_status = {
+            s.drone_id: {'radio_connected': s.radio_connected, 'wifi_connected': s.wifi_connected}
+            for s in msg.status
+        }
+        self.shared.set_link_status(link_status)
 
     def _make_image_callback(self, drone_id):
         def callback(msg: Image):

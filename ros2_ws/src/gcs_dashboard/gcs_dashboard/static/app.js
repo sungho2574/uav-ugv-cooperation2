@@ -503,6 +503,20 @@ function main() {
         visitedByDrone[droneId] = set;
       });
 
+      safeCall('link-badges', () => {
+        const linkStatus = state.link_status || {};
+        (window.DRONE_IDS || []).forEach((droneId) => {
+          const status = linkStatus[droneId];
+          const radioBadge = document.getElementById('radio-badge-' + droneId);
+          const wifiBadge = document.getElementById('wifi-badge-' + droneId);
+          if (!radioBadge || !wifiBadge) return;
+          // No entry at all (sim, or real_perception_node hasn't published
+          // yet) -> neutral "unknown" styling, not a false "disconnected".
+          radioBadge.className = 'link-badge' + (status ? (status.radio_connected ? ' up' : ' down') : '');
+          wifiBadge.className = 'link-badge' + (status ? (status.wifi_connected ? ' up' : ' down') : '');
+        });
+      });
+
       safeCall('setZones', () => gcsScene.setZones(state.zones || [], visitedByDrone));
       safeCall('buildLegend', () => buildLegend(state.zones || []));
       safeCall('setPlannedPaths', () => gcsScene.setPlannedPaths(state.paths || {}));

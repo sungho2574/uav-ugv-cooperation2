@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'cf_perception'
@@ -10,6 +13,11 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        # Without this, config/camera_intrinsics.yaml never lands in
+        # install/cf_perception/share/cf_perception/config/, and
+        # real_perception_node's camera_intrinsics_path (set by
+        # real.launch.py to that installed path) fails with FileNotFoundError.
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools', 'PyYAML', 'numpy', 'opencv-python'],
     zip_safe=True,

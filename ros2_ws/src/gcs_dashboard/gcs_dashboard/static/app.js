@@ -41,6 +41,37 @@ function lineLoopFromPoints(points, color, yLift) {
   return new THREE.Line(geom, new THREE.LineBasicMaterial({ color }));
 }
 
+// World-frame axis gizmo, drawn at the world origin (0,0,0) -- which is also
+// the map boundary's first corner (see mission_map.yaml), so it lands right
+// on a visible corner of the coverage area instead of floating in empty
+// space. X=red, Y=green, Z=blue (altitude, "up" in Three.js after w2t()).
+const WORLD_AXES = [
+  { dir: [1, 0, 0], color: '#ff4444', label: 'X' },
+  { dir: [0, 1, 0], color: '#44ff66', label: 'Y' },
+  { dir: [0, 0, 1], color: '#4499ff', label: 'Z' },
+];
+
+// Populates `group` directly (rather than returning a nested group) so
+// clearGroup() -- which only disposes an object's *own* geometry/material,
+// not recursively -- can dispose these children correctly on rescale.
+function populateWorldAxes(group, length) {
+  const origin = w2t(0, 0, 0);
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(length * 0.03, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })));
+  WORLD_AXES.forEach(({ dir, color, label }) => {
+    const end = w2t(dir[0] * length, dir[1] * length, dir[2] * length);
+    const geom = new THREE.BufferGeometry().setFromPoints([origin, end]);
+    group.add(new THREE.Line(geom, new THREE.LineBasicMaterial({ color })));
+    const sprite = makeTextSprite(label, color);
+    sprite.position.copy(end);
+    group.add(sprite);
+  });
+  const originLabel = makeTextSprite('(0,0)', '#ffffff');
+  originLabel.position.copy(origin).add(new THREE.Vector3(0, length * 0.15, 0));
+  group.add(originLabel);
+}
+
 function circlePoints(cx, cy, radius, segments) {
   const pts = [];
   const n = segments || 20;
@@ -95,6 +126,8 @@ class GcsScene {
     sun.position.set(10, 20, 5);
     this.scene.add(sun);
 
+    this.worldAxesGroup = new THREE.Group(); this.scene.add(this.worldAxesGroup);
+    populateWorldAxes(this.worldAxesGroup, 1.5); // rescaled once the map loads, see setMap()
     this.mapGroup = new THREE.Group(); this.scene.add(this.mapGroup);
     this.zoneGroup = new THREE.Group(); this.scene.add(this.zoneGroup);
     // Planned (gray dashed) path barely ever changes after the mission is
@@ -160,6 +193,12 @@ class GcsScene {
       this.controls.target.set(cx, 0, cy);
       this.camera.position.set(cx, Math.max(maxx - minx, maxy - miny) * 1.3 + 3, maxy + 6);
       this.controls.update();
+
+      // Size the axis gizmo relative to the map instead of a fixed guess, so
+      // it's readable whether the map is a 2m test rig or a 50m field.
+      const axisLen = Math.max(0.5, Math.min(3, Math.max(maxx - minx, maxy - miny) * 0.2));
+      clearGroup(this.worldAxesGroup);
+      populateWorldAxes(this.worldAxesGroup, axisLen);
     }
     (mapInfo.dead_zones || []).forEach((pts) => {
       if (pts.length < 3) return;

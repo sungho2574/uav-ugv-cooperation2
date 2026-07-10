@@ -38,11 +38,18 @@ from mission_control.zone_split import assign_cells_to_drones, build_cells
 DEAD_ZONE_MARGIN = 0.15
 
 
-def _compute_homes(mission_map):
+def _enabled_drone_ids(crazyflies_cfg):
+    """Same source as sim.launch.py -- see there for why."""
+    return [
+        drone_id for drone_id, robot_cfg in crazyflies_cfg.get('robots', {}).items()
+        if robot_cfg.get('enabled', True)
+    ]
+
+
+def _compute_homes(mission_map, drone_ids):
     """Same computation as sim.launch.py -- see there for why."""
     boundary = [tuple(p) for p in mission_map['boundary']]
     dead_zones = [[tuple(p) for p in dz['points']] for dz in mission_map.get('dead_zones', [])]
-    drone_ids = [d['id'] for d in mission_map['drones']]
     cells = build_cells(
         boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
     zone_cells = assign_cells_to_drones(cells, drone_ids)
@@ -53,10 +60,8 @@ def _compute_homes(mission_map):
     return homes
 
 
-def _generate_crazyflies_yaml(homes, base_crazyflies_path):
+def _generate_crazyflies_yaml(crazyflies_cfg, homes, base_crazyflies_path):
     """Same injection as sim.launch.py -- see there for why."""
-    with open(base_crazyflies_path, 'r') as f:
-        crazyflies_cfg = yaml.safe_load(f)
     for drone_id, (x, y) in homes.items():
         if drone_id in crazyflies_cfg.get('robots', {}):
             crazyflies_cfg['robots'][drone_id]['initial_position'] = [x, y, 0.0]
@@ -76,11 +81,15 @@ def _build(context, *args, **kwargs):
     camera_intrinsics_path = os.path.join(
         perception_share, 'config', 'camera_intrinsics.yaml')
 
+    with open(base_crazyflies_path, 'r') as f:
+        crazyflies_cfg = yaml.safe_load(f)
+    drone_ids = _enabled_drone_ids(crazyflies_cfg)
+
     with open(mission_map_path, 'r') as f:
         mission_map = yaml.safe_load(f)
-    homes = _compute_homes(mission_map)
-    generated_crazyflies_path = _generate_crazyflies_yaml(homes, base_crazyflies_path)
-    drone_ids = [d['id'] for d in mission_map['drones']]
+    homes = _compute_homes(mission_map, drone_ids)
+    generated_crazyflies_path = _generate_crazyflies_yaml(
+        crazyflies_cfg, homes, base_crazyflies_path)
 
     with open(ai_deck_ips_path, 'r') as f:
         ai_deck_ips = yaml.safe_load(f)
@@ -111,6 +120,7 @@ def _build(context, *args, **kwargs):
         output='screen',
         parameters=[{
             'mission_map_path': mission_map_path,
+            'drone_ids': drone_ids,
             'start_immediately': False,
         }],
     )

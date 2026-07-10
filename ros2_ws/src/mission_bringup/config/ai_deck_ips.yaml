@@ -7,6 +7,6 @@
 # access point is configured to hand out (commonly 192.168.4.1 by default,
 # which only works for a single drone unless each AI-deck's AP is
 # reconfigured to a distinct subnet/IP).
-cf1: "192.168.4.1"
-cf2: "192.168.4.2"
-cf3: "192.168.4.3"
+cf6: "192.168.4.1"
+cf7: "192.168.4.2"
+cf8: "192.168.4.3"

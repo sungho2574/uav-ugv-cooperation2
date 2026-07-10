@@ -34,7 +34,7 @@ LATCHED_QOS = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
 )
 
-DRONE_COLORS = {'cf1': '#ff5555', 'cf2': '#55aaff', 'cf3': '#55dd77'}
+DRONE_COLORS = {'cf6': '#ff5555', 'cf7': '#55aaff', 'cf8': '#55dd77'}
 DEFAULT_COLOR = '#cccccc'
 
 
@@ -100,7 +100,7 @@ class GcsNode(Node):
         self.shared = shared
         self.bridge = CvBridge()
 
-        self.declare_parameter('drone_ids', ['cf1', 'cf2', 'cf3'])
+        self.declare_parameter('drone_ids', ['cf6', 'cf7', 'cf8'])
         self.declare_parameter('port', 5000)
         self.declare_parameter('mission_map_path', '')
         self.declare_parameter('true_markers_path', '')

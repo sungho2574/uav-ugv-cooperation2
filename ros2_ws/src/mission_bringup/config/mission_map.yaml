@@ -13,7 +13,7 @@ marker_size: 0.14
 # tracks a faster-moving cmd_full_state reference more loosely, so it may
 # never come within control_node's `arrival_radius` parameter of every cell
 # center. See control_node.py's _step_covering/_update_visited_cells.
-cruise_speed: 0.3
+cruise_speed: 0.1
 
 boundary: [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]]
 
@@ -26,19 +26,17 @@ dead_zones:
   - name: "obstacle_1"
     points: [[8.0, 5.0], [10.0, 5.0], [10.0, 6.0], [8.0, 6.0]]
 
-# `home_position` below is NOT the actual spawn point -- it's only a startup
-# placeholder before planning runs. Each drone's real home is computed as the
-# first cell of whichever zone it's assigned (Nth drone in this list -> Nth
-# region, left to right), so it always spawns inside its own zone instead of
-# needing a long commute from some pre-given point that may not even be
-# inside the zone the automatic split hands it. See coverage_plan.py.
-drones:
-  - id: "cf1"
-    home_yaw: 0.0
-  - id: "cf2"
-    home_yaw: 0.0
-  - id: "cf3"
-    home_yaw: 0.0
+# Drone identity/count is NOT configured here -- crazyswarm2 already requires
+# crazyflies.yaml (mission_bringup/config/crazyflies.yaml) to exist and list
+# every robot with its radio uri/type, so that file is the single source of
+# truth for which drones fly: sim.launch.py/real.launch.py read its `enabled`
+# robots and use that as the drone_ids list everywhere (control_node,
+# cf_perception, gcs_dashboard). To fly with fewer than 3 drones, toggle
+# `enabled` per-robot in crazyflies.yaml -- nothing to change here.
+# Each drone's actual spawn point/home is computed at launch time as the
+# first cell of whichever zone it's assigned (Nth enabled drone in
+# crazyflies.yaml -> Nth region, left to right); home_yaw is always 0
+# (hardcoded in control_node.py, not configurable). See coverage_plan.py.
 
 ugv:
   start_position: [0.5, 0.0, 0.0]

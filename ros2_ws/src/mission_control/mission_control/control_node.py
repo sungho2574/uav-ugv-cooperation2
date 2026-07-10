@@ -73,11 +73,10 @@ def dist2d(a, b):
 class DroneHandle:
     """Per-drone crazyswarm2 clients + coverage-following state."""
 
-    def __init__(self, node, drone_id, home_position, home_yaw):
+    def __init__(self, node, drone_id, home_position):
         self.node = node
         self.drone_id = drone_id
         self.home_position = home_position  # [x, y, z]
-        self.home_yaw = home_yaw
         prefix = '/' + drone_id
         self.takeoff_client = node.create_client(Takeoff, prefix + '/takeoff')
         self.land_client = node.create_client(Land, prefix + '/land')
@@ -174,6 +173,10 @@ class ControlNode(Node):
         super().__init__('control_node')
 
         self.declare_parameter('mission_map_path', '')
+        # crazyswarm2's crazyflies.yaml (its `enabled` robots) is the single
+        # source of truth for which drones fly -- sim.launch.py/real.launch.py
+        # read it and pass the enabled id list in as this parameter.
+        self.declare_parameter('drone_ids', ['cf6'])
         self.declare_parameter('min_leg_duration', 1.5)
         self.declare_parameter('leg_settle_margin', 0.5)
         self.declare_parameter('takeoff_duration', 2.0)
@@ -184,6 +187,7 @@ class ControlNode(Node):
         self.declare_parameter('dead_zone_margin', 0.15)
         self.declare_parameter('arrival_radius', 0.25)
 
+        self.drone_ids = list(self.get_parameter('drone_ids').value)
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
         self.leg_settle_margin = self.get_parameter('leg_settle_margin').value
         self.takeoff_duration = self.get_parameter('takeoff_duration').value
@@ -214,11 +218,10 @@ class ControlNode(Node):
         # home_position here is just a startup placeholder -- _do_plan() below
         # overwrites it with the actual first cell of whatever zone this drone
         # ends up assigned, once that's known (see coverage_plan.plan_coverage).
-        for d in self.mission_map['drones']:
-            placeholder_home = d.get('home_position', [0.0, 0.0, 0.0])
-            handle = DroneHandle(self, d['id'], placeholder_home, d.get('home_yaw', 0.0))
+        for drone_id in self.drone_ids:
+            handle = DroneHandle(self, drone_id, [0.0, 0.0, 0.0])
             handle.wait_for_services(self, timeout_sec=5.0)
-            self.drones[d['id']] = handle
+            self.drones[drone_id] = handle
 
         self.zones_pub = self.create_publisher(
             ZoneAssignmentArray, '/mission/zones', LATCHED_QOS)
@@ -323,10 +326,9 @@ class ControlNode(Node):
         dead_zones = [
             [tuple(p) for p in dz['points']] for dz in self.mission_map.get('dead_zones', [])
         ]
-        drone_ids = [d['id'] for d in self.mission_map['drones']]
         cells = build_cells(
             boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
-        self.zone_cells = assign_cells_to_drones(cells, drone_ids)
+        self.zone_cells = assign_cells_to_drones(cells, self.drone_ids)
 
     @staticmethod
     def _build_cum_dist(waypoints):

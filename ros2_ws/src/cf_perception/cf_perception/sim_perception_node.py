@@ -40,7 +40,7 @@ class SimPerceptionNode(Node):
     def __init__(self):
         super().__init__('sim_perception_node')
 
-        self.declare_parameter('drone_ids', ['cf1', 'cf2', 'cf3'])
+        self.declare_parameter('drone_ids', ['cf6', 'cf7', 'cf8'])
         self.declare_parameter('true_markers_path', '')
         self.declare_parameter('mission_map_path', '')
         self.declare_parameter('world_frame', 'world')

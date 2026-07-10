@@ -49,7 +49,7 @@ def build_cells(boundary_points, dead_zone_point_lists, cell_size, dead_zone_mar
 
 
 def assign_cells_to_drones(cells, drone_ids):
-    """drone_ids: ordered list of drone id strings, e.g. ['cf1', 'cf2', 'cf3'].
+    """drone_ids: ordered list of drone id strings, e.g. ['cf6', 'cf7', 'cf8'].
 
     Splits the set of occupied columns into len(drone_ids) contiguous bands
     of (nearly) equal column count, left to right, and matches band i to

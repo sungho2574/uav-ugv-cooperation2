@@ -229,7 +229,7 @@ class RealPerceptionNode(Node):
     def __init__(self):
         super().__init__('real_perception_node')
 
-        self.declare_parameter('drone_ids', ['cf1', 'cf2', 'cf3'])
+        self.declare_parameter('drone_ids', ['cf6', 'cf7', 'cf8'])
         self.declare_parameter('wifi_ips', [''])
         self.declare_parameter('wifi_port', 5000)
         self.declare_parameter('marker_size', 0.14)

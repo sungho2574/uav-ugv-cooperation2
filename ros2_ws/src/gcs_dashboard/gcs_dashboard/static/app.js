@@ -1,12 +1,24 @@
 // GCS 3D dashboard front end. Polls the Flask REST API (backed by ROS2 topics
 // on the gcs_node side) and renders everything with Three.js. World frame is
 // (x, y) on the ground plane + z = altitude; mapped into Three.js's right-handed
-// Y-up space as (x, z_world, y_world) so "z up" in Three.js == altitude.
+// Y-up space as (-x, z_world, y_world) so "z up" in Three.js == altitude.
+//
+// Why the world x is NEGATED here: the operator watches the arena from the
+// +y (far) side (see the camera setup in setMap), and from that viewpoint the
+// world +x direction runs to their LEFT. Mapping world x straight to Three.js
+// +x put it on screen-right instead, so on real hardware a drone flying +x
+// appeared to move the wrong way across the map (x mirrored; y, the depth
+// axis, still looked right). Negating x reflects the whole scene about the
+// x-axis so screen left/right matches the physical room. This is purely a
+// rendering convention -- /states, control_node commands and the drone's own
+// estimate are all already world-consistent (the drone flies correctly); only
+// the on-screen picture was mirrored. Every world->Three.js path must apply
+// the same negation: w2t() below, and polygonShape() (ground + zone meshes).
 
 const FALLBACK_COLORS = { cf1: '#ff5555', cf2: '#55aaff', cf3: '#55dd77' };
 
 function w2t(x, y, z) {
-  return new THREE.Vector3(x, z || 0, y);
+  return new THREE.Vector3(-x, z || 0, y);
 }
 
 function makeTextSprite(text, color) {
@@ -28,9 +40,12 @@ function makeTextSprite(text, color) {
 }
 
 function polygonShape(points) {
+  // Shapes are built in the XY plane then rotateX(PI/2)'d onto the ground, so a
+  // shape point (sx, sy) lands at Three.js (sx, 0, sy). To match w2t()'s
+  // world-x negation (see the file header), the shape's x must be -world_x.
   const shape = new THREE.Shape();
   points.forEach(([x, y], i) => {
-    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+    if (i === 0) shape.moveTo(-x, y); else shape.lineTo(-x, y);
   });
   return shape;
 }
@@ -190,8 +205,10 @@ class GcsScene {
       this.mapGroup.add(new THREE.LineSegments(gridGeom, gridMat));
 
       const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
-      this.controls.target.set(cx, 0, cy);
-      this.camera.position.set(cx, Math.max(maxx - minx, maxy - miny) * 1.3 + 3, maxy + 6);
+      // Scene x is negated (see file header), so the arena center sits at
+      // Three.js x = -cx; aim the camera there to keep it framed.
+      this.controls.target.set(-cx, 0, cy);
+      this.camera.position.set(-cx, Math.max(maxx - minx, maxy - miny) * 1.3 + 3, maxy + 6);
       this.controls.update();
 
       // Size the axis gizmo relative to the map instead of a fixed guess, so
@@ -390,9 +407,11 @@ class GcsScene {
       const mesh = this.droneMeshes[d.id];
       mesh.position.copy(w2t(d.x, d.y, d.z));
       // yaw is rotation about the world's vertical (Z) axis, which maps to
-      // Three.js's Y axis under w2t() -- rotating the whole group about local
-      // Y turns the axes helper's local X (red) into the drone's heading.
-      mesh.rotation.set(0, -d.yaw, 0);
+      // Three.js's Y axis. w2t() maps world y->Three.js z (one handedness flip,
+      // giving -yaw) and additionally negates world x (a second flip), so the
+      // two cancel and the heading is +yaw here -- keeping the drone's heading
+      // arrow pointing the correct physical way in the reflected scene.
+      mesh.rotation.set(0, d.yaw, 0);
 
       // Dashed tether down to the ground point directly below the drone --
       // paths/visited cells are drawn on the ground (see setPaths), so this

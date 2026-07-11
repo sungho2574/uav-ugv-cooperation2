@@ -1,22 +1,30 @@
-"""YOLOv8-ONNX object detector via OpenCV's DNN module (no extra dependency --
-opencv-python's cv2.dnn already ships with the rest of this package's cv2 use).
+"""YOLO object detector via the `ultralytics` package itself.
 
-Assumes the .onnx weights come from an Ultralytics `model.export(format='onnx')`
-with default settings: single output tensor of shape (1, 4 + num_classes, N)
-(box xywh in letterboxed-input pixel space, followed by one score per class --
-no separate objectness column, no NMS baked into the graph). If your export
-used `nms=True` or a different output layout, this postprocessing will not
-line up with it -- re-export without `nms=True`, or adjust `_postprocess`.
+Earlier versions of this file hand-rolled ONNX inference (first cv2.dnn, then
+onnxruntime with manually-written letterbox/NMS postprocessing) to avoid
+pulling in `ultralytics` as a dependency. Both were dropped: cv2.dnn can't
+import YOLO11's attention (C2PSA) blocks at all, and hand-written
+pre/postprocessing is a second place a format-assumption mismatch (letterbox
+padding, output tensor layout, class ordering, ...) can silently produce wrong
+boxes -- exactly the class of bug this project's weights are unlikely to hit
+if the model is just run through the same library it was trained/exported
+with. `ultralytics.YOLO` loads .onnx weights directly (dispatching to
+onnxruntime internally) and returns boxes already in original-frame pixel
+coordinates with class names read straight from the model's own export
+metadata, so there's no separate format contract to keep in sync here.
 """
-import cv2
-import numpy as np
+from ultralytics import YOLO
 
 
 class YoloDetector:
     def __init__(self, weights_path, class_names=None, confidence_threshold=0.5,
                  nms_threshold=0.45, input_size=640):
-        self.net = cv2.dnn.readNetFromONNX(weights_path)
-        self.class_names = class_names or []
+        self.model = YOLO(weights_path)
+        # Optional override -- if not given, class names come from the model's
+        # own export metadata (model.names / per-result r.names), which is
+        # what you get for free when the .onnx was produced by your own
+        # `model.export()` from a trained ultralytics run.
+        self.class_names = class_names or None
         self.confidence_threshold = confidence_threshold
         self.nms_threshold = nms_threshold
         self.input_size = input_size
@@ -29,60 +37,26 @@ class YoloDetector:
         pixel_ray_to_world) -- more accurate than the box center for an
         obliquely-mounted camera, since the bottom edge is where the object
         actually touches the floor in the image."""
-        h, w = frame_bgr.shape[:2]
-        scale = self.input_size / max(h, w)
-        nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-        resized = cv2.resize(frame_bgr, (nw, nh))
-        canvas = np.zeros((self.input_size, self.input_size, 3), dtype=np.uint8)
-        canvas[:nh, :nw] = resized
+        results = self.model.predict(
+            frame_bgr, conf=self.confidence_threshold, iou=self.nms_threshold,
+            imgsz=self.input_size, verbose=False)
+        r = results[0]
 
-        blob = cv2.dnn.blobFromImage(
-            canvas, 1 / 255.0, (self.input_size, self.input_size), swapRB=True, crop=False)
-        self.net.setInput(blob)
-        raw = self.net.forward()
-
-        return self._postprocess(raw, scale)
-
-    def _postprocess(self, raw, scale):
-        # raw: (1, 4+nc, N) -> (N, 4+nc): [cx, cy, w, h, score_0, ..., score_{nc-1}]
-        # in letterboxed-canvas pixel coordinates.
-        preds = raw[0].T
-        if preds.shape[0] == 0:
-            return []
-        boxes_cxcywh = preds[:, :4]
-        class_scores = preds[:, 4:]
-        class_ids = np.argmax(class_scores, axis=1)
-        confidences = class_scores[np.arange(len(class_ids)), class_ids]
-
-        keep = confidences >= self.confidence_threshold
-        if not np.any(keep):
-            return []
-        boxes_cxcywh, class_ids, confidences = (
-            boxes_cxcywh[keep], class_ids[keep], confidences[keep])
-
-        # Undo the letterbox scale to get back to original-frame pixels, and
-        # cxcywh -> xywh (top-left corner) for cv2.dnn.NMSBoxes.
-        boxes_xywh = []
-        for cx, cy, bw, bh in boxes_cxcywh:
-            x = (cx - bw / 2.0) / scale
-            y = (cy - bh / 2.0) / scale
-            boxes_xywh.append([x, y, bw / scale, bh / scale])
-
-        indices = cv2.dnn.NMSBoxes(
-            boxes_xywh, confidences.tolist(), self.confidence_threshold, self.nms_threshold)
-        if len(indices) == 0:
-            return []
-
-        results = []
-        for i in np.array(indices).flatten():
-            x, y, bw, bh = boxes_xywh[i]
-            class_id = int(class_ids[i])
-            name = self.class_names[class_id] if class_id < len(self.class_names) else str(class_id)
-            results.append({
+        detections = []
+        for box in r.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            class_id = int(box.cls[0])
+            confidence = float(box.conf[0])
+            if self.class_names and class_id < len(self.class_names):
+                name = self.class_names[class_id]
+            else:
+                name = r.names.get(class_id, str(class_id))
+            bw, bh = x2 - x1, y2 - y1
+            detections.append({
                 'class_id': class_id,
                 'class_name': name,
-                'confidence': float(confidences[i]),
-                'bbox': (x, y, bw, bh),
-                'ground_px': (x + bw / 2.0, y + bh),
+                'confidence': confidence,
+                'bbox': (x1, y1, bw, bh),
+                'ground_px': (x1 + bw / 2.0, y2),
             })
-        return results
+        return detections

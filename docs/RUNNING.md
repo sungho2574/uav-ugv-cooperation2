@@ -23,11 +23,11 @@
 - ROS 2 (Humble 이상 권장)
 - [crazyswarm2](https://github.com/IMRCLab/crazyswarm2) 및 그 의존 패키지(`crazyflie`, `crazyflie_py`, `crazyflie_sim`, `crazyflie_interfaces`)가 같은 워크스페이스 안에 소스로 존재하고 빌드 가능해야 함
 - `cv_bridge` (ROS 2 vision_opencv, apt로 설치: `ros-<distro>-cv-bridge`)
-- Python 패키지: `shapely`, `PyYAML`, `numpy`, `opencv-python`(또는 `opencv-contrib-python`, `cv2.aruco` 필요), `flask`
+- Python 패키지: `shapely`, `PyYAML`, `numpy`, `opencv-python`(또는 `opencv-contrib-python`, `cv2.aruco` 필요), `flask`, `ultralytics`(YOLO 백엔드용 -- 모델을 학습/export한 것과 같은 라이브러리로 직접 추론함. `cv2.dnn`은 YOLO11의 attention 블록을 import하지 못해 쓰지 않음, [map_configuration.md](map_configuration.md) 8.4 참고. `ultralytics`는 `torch` 등 무거운 의존성을 함께 설치하니 용량/설치 시간 여유를 두고 설치할 것)
 - 실기체 사용 시: AI-deck가 붙은 Crazyflie 3대, 같은 WiFi 네트워크, Crazyradio PA 동글
 
 ```bash
-pip install shapely PyYAML numpy opencv-python flask
+pip install shapely PyYAML numpy opencv-python flask ultralytics
 ```
 
 ## 2. 빌드

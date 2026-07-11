@@ -23,7 +23,12 @@ setup(
         # (see DEFAULT_YOLO_WEIGHTS_FILENAME there), not the source tree.
         (os.path.join('share', package_name, 'weights'), glob('cf_perception/weights/*.onnx')),
     ],
-    install_requires=['setuptools', 'PyYAML', 'numpy', 'opencv-python'],
+    # `ultralytics` runs the YOLO .onnx graph with the same pre/postprocessing
+    # it was trained/exported with (see yolo_detector.py) -- cv2.dnn was tried
+    # first but can't import YOLO11's C2PSA attention blocks, and a hand-rolled
+    # onnxruntime postprocessing pass after that risked its own format-
+    # assumption bugs.
+    install_requires=['setuptools', 'PyYAML', 'numpy', 'opencv-python', 'ultralytics'],
     zip_safe=True,
     maintainer='sungho',
     maintainer_email='sungho2574@gmail.com',

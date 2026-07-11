@@ -499,6 +499,7 @@ function main() {
   });
 
   const startBtn = document.getElementById('start-btn');
+  const killBtn = document.getElementById('kill-btn');
   const markerStatusEl = document.getElementById('marker-status');
 
   const videoPane = document.getElementById('video-pane');
@@ -572,6 +573,11 @@ function main() {
         const canStart = state.mission_state === 'AWAITING_START';
         startBtn.disabled = !canStart;
         startBtn.textContent = canStart ? 'Start Mission' : `Mission ${state.mission_state}`;
+      });
+      safeCall('kill-btn', () => {
+        const killed = state.mission_state === 'KILLED';
+        killBtn.classList.toggle('killed', killed);
+        killBtn.textContent = killed ? '■ KILLED' : '■ KILL';
       });
       zoneColors = {};
       (state.zones || []).forEach((z) => { zoneColors[z.drone_id] = z.color; });
@@ -648,6 +654,22 @@ function main() {
       // On success the next /api/state poll will flip mission_state away from
       // AWAITING_START and keep the button disabled from there on.
     }).catch(() => { startBtn.disabled = false; });
+  });
+
+  // Emergency kill switch: cut all motors + halt the mission FSM. No confirm
+  // dialog on purpose -- when a drone is about to hit a wall, the whole point
+  // is an instant reaction. Bound to both the button and the 'k' key.
+  function killMission() {
+    fetch('/api/mission/kill', { method: 'POST' }).then((r) => r.json()).then((res) => {
+      if (!res.success) alert('kill failed: ' + res.message);
+    }).catch(() => alert('kill request failed'));
+  }
+  killBtn.addEventListener('click', killMission);
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'k' && e.key !== 'K') return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;  // don't fire while typing
+    killMission();
   });
 
   function animate() {

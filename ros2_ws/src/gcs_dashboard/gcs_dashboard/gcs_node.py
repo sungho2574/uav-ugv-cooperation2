@@ -138,6 +138,7 @@ class GcsNode(Node):
                 self._make_image_callback(drone_id), 2)
 
         self.start_client = self.create_client(Trigger, '/mission/start')
+        self.kill_client = self.create_client(Trigger, '/mission/kill')
 
     def _load_map_info(self, path):
         """mission_map.yaml is known in advance (unlike true_markers.yaml), so gcs_dashboard
@@ -242,6 +243,19 @@ class GcsNode(Node):
             return future.result().success, future.result().message
         return False, 'mission/start call timed out'
 
+    def request_mission_kill(self):
+        """Emergency kill -- same non-blocking-from-Flask pattern as
+        request_mission_start (poll the future, the ROS spin runs elsewhere)."""
+        if not self.kill_client.service_is_ready():
+            return False, 'mission/kill service not available'
+        future = self.kill_client.call_async(Trigger.Request())
+        deadline = time.time() + 2.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if future.done() and future.result() is not None:
+            return future.result().success, future.result().message
+        return False, 'mission/kill call timed out'
+
 
 shared_state = SharedState()
 ros_node = None
@@ -287,6 +301,13 @@ def api_frame(drone_id):
 @app.route('/api/mission/start', methods=['POST'])
 def api_mission_start():
     success, message = ros_node.request_mission_start()
+    return jsonify({'success': success, 'message': message})
+
+
+@app.route('/api/mission/kill', methods=['POST'])
+def api_mission_kill():
+    """Emergency kill switch -- cuts all motors and halts the mission FSM."""
+    success, message = ros_node.request_mission_kill()
     return jsonify({'success': success, 'message': message})
 
 

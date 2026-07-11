@@ -45,7 +45,7 @@ from mission_interfaces.msg import (
 )
 from nav_msgs.msg import Path
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
+from std_srvs.srv import Empty, Trigger
 
 from mission_control.coverage_plan import plan_coverage
 from mission_control.zone_split import assign_cells_to_drones, build_cells
@@ -83,6 +83,11 @@ class DroneHandle:
         self.go_to_client = node.create_client(GoTo, prefix + '/go_to')
         self.notify_setpoints_stop_client = node.create_client(
             NotifySetpointsStop, prefix + '/notify_setpoints_stop')
+        # Emergency motor cut-off (crazyswarm2 `emergency` service, std_srvs/Empty)
+        # -- used by the mission kill switch. On real hardware this immediately
+        # stops the motors (firmware send_emergency_stop); the sim backend stubs
+        # it, so the button is still safe to test in sim.
+        self.emergency_client = node.create_client(Empty, prefix + '/emergency')
         # Streaming position reference used during COVERING -- see module
         # docstring for why this replaces per-cell go_to calls.
         self.cmd_full_state_pub = node.create_publisher(FullState, prefix + '/cmd_full_state', 1)
@@ -165,6 +170,11 @@ class DroneHandle:
         req.group_mask = 0
         req.remain_valid_millisecs = remain_valid_millisecs
         self.notify_setpoints_stop_client.call_async(req)
+
+    def send_emergency(self):
+        """Emergency motor cut-off -- fire-and-forget, non-blocking. This is a
+        hard stop (motors off, the drone drops), NOT a graceful land."""
+        self.emergency_client.call_async(Empty.Request())
 
 
 class ControlNode(Node):
@@ -255,6 +265,12 @@ class ControlNode(Node):
         self._start_requested = self.get_parameter('start_immediately').value
         self.start_srv = self.create_service(Trigger, '/mission/start', self._on_start_request)
 
+        # Emergency kill switch (GCS button / 'k' key). Once tripped it cuts all
+        # motors and permanently freezes the FSM -- there is no un-kill; recover
+        # by restarting the mission stack.
+        self._killed = False
+        self.kill_srv = self.create_service(Trigger, '/mission/kill', self._on_kill_request)
+
         self.state = 'DECOMPOSE'
         self._phase_deadline = None
         self._takeoff_sent = False
@@ -292,8 +308,26 @@ class ControlNode(Node):
         response.message = 'mission start requested'
         return response
 
+    def _on_kill_request(self, request, response):
+        # Cut motors on every drone immediately, then freeze the FSM (the
+        # _tick early-return below) so no further setpoints/go_to commands go
+        # out. Hard emergency stop: the drones drop rather than land -- that's
+        # deliberate, a controlled drop beats driving into a wall.
+        self._killed = True
+        for handle in self.drones.values():
+            handle.send_emergency()
+        self._set_state('KILLED')
+        self.get_logger().warn('EMERGENCY KILL: motors cut on all drones, mission halted')
+        response.success = True
+        response.message = 'emergency kill: motors cut on all drones'
+        return response
+
     # ---- FSM -----------------------------------------------------
     def _tick(self):
+        # Emergency kill: motors are already cut in _on_kill_request; make sure
+        # the FSM never sends another command from here on.
+        if self._killed:
+            return
         now = time.monotonic()
         if self.state == 'DECOMPOSE':
             self._do_decompose()

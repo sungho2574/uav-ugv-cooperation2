@@ -57,9 +57,19 @@
                    border-radius: 4px; border: none; background: rgba(20,22,26,0.85);
                    color: #e6e6e6; cursor: pointer; font-size: 14px; }
   #video-toggle:hover { background: rgba(45,50,58,0.9); }
+  /* Always-visible emergency kill switch (also bound to the 'k' key in app.js).
+     Fixed top-center so it's reachable in any mission state. */
+  #kill-btn { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 30;
+              padding: 8px 22px; border-radius: 6px; border: 2px solid #ff8a80;
+              background: #b71c1c; color: white; cursor: pointer; font-size: 15px;
+              font-weight: 700; letter-spacing: 0.5px; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+  #kill-btn:hover { background: #d32f2f; }
+  #kill-btn:active { background: #7f1010; }
+  #kill-btn.killed { background: #4a1010; border-color: #7f1010; cursor: default; }
 </style>
 </head>
 <body>
+<button id="kill-btn" title="비상 정지: 모든 드론 모터 즉시 차단 (단축키: K)">■ KILL</button>
 <div id="layout">
   <div id="scene-pane">
     <div id="hud">

@@ -275,10 +275,9 @@ class YoloBackend:
     """Wraps YoloDetector + pixel_ray_to_world into the same interface as
     ArucoBackend (see its docstring for the raw_count/results distinction)."""
 
-    def __init__(self, weights_path, camera_matrix, class_names, confidence_threshold,
-                 nms_threshold, input_size, target_height, cluster_radius):
-        self.yolo = YoloDetector(
-            weights_path, class_names, confidence_threshold, nms_threshold, input_size)
+    def __init__(self, weights_path, camera_matrix, confidence_threshold,
+                 nms_threshold, target_height, cluster_radius):
+        self.yolo = YoloDetector(weights_path, confidence_threshold, nms_threshold)
         self.camera_matrix = camera_matrix
         self.target_height = target_height
         self.cluster_radius = cluster_radius
@@ -453,10 +452,8 @@ class RealPerceptionNode(Node):
         # wired through by real.launch.py.
         self.declare_parameter('detection_backend', 'aruco')
         self.declare_parameter('yolo_weights_path', '')
-        self.declare_parameter('yolo_class_names', [''])
         self.declare_parameter('yolo_confidence_threshold', 0.5)
         self.declare_parameter('yolo_nms_threshold', 0.45)
-        self.declare_parameter('yolo_input_size', 640)
         self.declare_parameter('yolo_target_height', 0.0)
         self.declare_parameter('yolo_cluster_radius', 0.5)
 
@@ -484,12 +481,10 @@ class RealPerceptionNode(Node):
                         "detection_backend is 'yolo' but yolo_weights_path is empty -- "
                         'set mission_map.yaml\'s yolo.weights_path to an exported .onnx '
                         'file (see docs/map_configuration.md)')
-                class_names = [n for n in self.get_parameter('yolo_class_names').value if n]
                 return YoloBackend(
-                    weights_path, camera_matrix, class_names,
+                    weights_path, camera_matrix,
                     self.get_parameter('yolo_confidence_threshold').value,
                     self.get_parameter('yolo_nms_threshold').value,
-                    self.get_parameter('yolo_input_size').value,
                     self.get_parameter('yolo_target_height').value,
                     self.get_parameter('yolo_cluster_radius').value)
             elif detection_backend == 'aruco':

@@ -1,33 +1,32 @@
 """YOLO object detector via the `ultralytics` package itself.
 
-Earlier versions of this file hand-rolled ONNX inference (first cv2.dnn, then
-onnxruntime with manually-written letterbox/NMS postprocessing) to avoid
-pulling in `ultralytics` as a dependency. Both were dropped: cv2.dnn can't
-import YOLO11's attention (C2PSA) blocks at all, and hand-written
-pre/postprocessing is a second place a format-assumption mismatch (letterbox
-padding, output tensor layout, class ordering, ...) can silently produce wrong
-boxes -- exactly the class of bug this project's weights are unlikely to hit
-if the model is just run through the same library it was trained/exported
-with. `ultralytics.YOLO` loads .onnx weights directly (dispatching to
-onnxruntime internally) and returns boxes already in original-frame pixel
-coordinates with class names read straight from the model's own export
-metadata, so there's no separate format contract to keep in sync here.
+`ultralytics.YOLO` loads .onnx weights directly and returns boxes already in
+original-frame pixel coordinates, with class names read straight from the
+model's own export metadata (`r.names`) -- since that's the same library the
+model was trained/exported with, there's no separate ONNX pre/postprocessing
+format to keep in sync here.
+
+`task='detect'` is passed explicitly (rather than left for ultralytics to
+guess from the .onnx) to silence its "unable to automatically guess model
+task" warning and to fail loudly instead of silently on a non-detection model.
+
+`imgsz` is deliberately NOT passed to predict() -- letting ultralytics read
+the input size from the model's own embedded export metadata instead of a
+config value we'd have to keep in sync by hand. A .onnx exported with a
+static (non-dynamic) input shape hardcodes that size into the graph itself;
+overriding it with a different `imgsz` here made onnxruntime fail with an
+INVALID_ARGUMENT shape mismatch (seen in practice: model exported at 416x416,
+code was forcing 640x640). Always matching whatever size the weights were
+actually exported at avoids that whole class of bug.
 """
 from ultralytics import YOLO
 
 
 class YoloDetector:
-    def __init__(self, weights_path, class_names=None, confidence_threshold=0.5,
-                 nms_threshold=0.45, input_size=640):
-        self.model = YOLO(weights_path)
-        # Optional override -- if not given, class names come from the model's
-        # own export metadata (model.names / per-result r.names), which is
-        # what you get for free when the .onnx was produced by your own
-        # `model.export()` from a trained ultralytics run.
-        self.class_names = class_names or None
+    def __init__(self, weights_path, confidence_threshold=0.5, nms_threshold=0.45):
+        self.model = YOLO(weights_path, task='detect')
         self.confidence_threshold = confidence_threshold
         self.nms_threshold = nms_threshold
-        self.input_size = input_size
 
     def detect_raw(self, frame_bgr):
         """Returns a list of {class_id, class_name, confidence, bbox (x, y, w, h)
@@ -38,8 +37,7 @@ class YoloDetector:
         obliquely-mounted camera, since the bottom edge is where the object
         actually touches the floor in the image."""
         results = self.model.predict(
-            frame_bgr, conf=self.confidence_threshold, iou=self.nms_threshold,
-            imgsz=self.input_size, verbose=False)
+            frame_bgr, conf=self.confidence_threshold, iou=self.nms_threshold, verbose=False)
         r = results[0]
 
         detections = []
@@ -47,10 +45,7 @@ class YoloDetector:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             class_id = int(box.cls[0])
             confidence = float(box.conf[0])
-            if self.class_names and class_id < len(self.class_names):
-                name = self.class_names[class_id]
-            else:
-                name = r.names.get(class_id, str(class_id))
+            name = r.names.get(class_id, str(class_id))
             bw, bh = x2 - x1, y2 - y1
             detections.append({
                 'class_id': class_id,

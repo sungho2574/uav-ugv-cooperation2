@@ -1,15 +1,33 @@
 #!/usr/bin/env python3
-"""Real-hardware Crazyflie telemetry + marker detection.
+"""Real-hardware Crazyflie telemetry + marker/object detection.
 
 Same /states and /detections topic contract as sim_perception_node.py, but
 position comes from crazyswarm2's real backend (/cfN/pose, populated over
-radio -- we don't parse radio telemetry ourselves) and marker detections come
-from actually running ArUco on AI-deck video instead of checking a
+radio -- we don't parse radio telemetry ourselves) and detections come from
+actually running a vision model on AI-deck video instead of checking a
 ground-truth file. Also publishes /mission/link_status (real-only, no sim
 equivalent): per-drone radio/WiFi connectivity, shown as badges in the GCS
 video panel -- radio connectivity is inferred from /cfN/pose staleness since
 crazyswarm2 has no explicit "connected" boolean topic, WiFi connectivity
 comes straight from DroneLink's socket state.
+
+Two interchangeable detection backends, picked per mission_map.yaml's
+`detection_backend` field (see real.launch.py, which reads it and passes it
+in as this node's `detection_backend` parameter):
+
+  - "aruco" (default): ArucoBackend. Fiducial markers give a persistent,
+    unambiguous ID directly, plus a metric depth via solvePnP (marker_size is
+    known), so world position comes from the marker's own geometry.
+  - "yolo": YoloBackend. A YOLOv8-ONNX object detector gives a class + 2D
+    pixel box but no depth and no persistent identity. World position is
+    instead recovered by casting a ray from the camera through the box's
+    ground-contact pixel and intersecting it with the (known-altitude) ground
+    plane -- see pixel_ray_to_world. Since there's no true per-object ID,
+    repeated sightings of the same physical object are deduplicated by
+    rounding its *computed world position* into a grid bucket (see
+    _synthetic_marker_id) rather than by a real tracked identity -- two
+    same-class objects closer together than `yolo.cluster_radius` will be
+    merged into one record. See docs/map_configuration.md for tuning this.
 
 The WiFi frame protocol (rx_bytes/receive_frame/try_connect, magic byte 0xBC)
 and the camera->body rotation assumption are carried over verbatim from the
@@ -32,6 +50,8 @@ from geometry_msgs.msg import PoseStamped
 from mission_interfaces.msg import DroneState, LinkStatus, LinkStatusArray, MarkerDetection
 from sensor_msgs.msg import Image
 
+from cf_perception.yolo_detector import YoloDetector
+
 # Reused from uav-ugv-cooperation/dashboard/dashboard_aruco.py: assumes the AI-deck
 # camera is mounted pointing 45 deg nose-down from the drone's front. VERIFY against
 # the actual mounting angle on the real hardware before trusting detections.
@@ -42,6 +62,18 @@ R_CAM_TO_BODY = np.array(
      [0.0, -_S, -_S]],
     dtype=np.float64,
 )
+
+
+def _rotate_body_to_world_yaw(v_body, yaw_rad):
+    """Rotate a body-frame vector into the world frame assuming zero roll/pitch
+    (the drone is level) -- only yaw is applied, about the world Z axis. Shared
+    by both backends: marker_to_world (ArUco, known depth) and
+    pixel_ray_to_world (YOLO, ray direction only, depth solved separately)."""
+    cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
+    x_rel = cy * v_body[0] - sy * v_body[1]
+    y_rel = sy * v_body[0] + cy * v_body[1]
+    z_rel = v_body[2]
+    return x_rel, y_rel, z_rel
 
 
 def rx_bytes(sock, size):
@@ -163,33 +195,157 @@ class ArucoDetector:
 
 
 def marker_to_world(tvec, drone_x, drone_y, drone_z, yaw_rad):
+    """ArUco path: tvec is a full metric 3D point from solvePnP (marker_size
+    gives real depth), so this only needs to rotate it into world and add the
+    drone's own position."""
     p_body = R_CAM_TO_BODY @ tvec
-    cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
-    x_rel = cy * p_body[0] - sy * p_body[1]
-    y_rel = sy * p_body[0] + cy * p_body[1]
-    z_rel = p_body[2]
+    x_rel, y_rel, z_rel = _rotate_body_to_world_yaw(p_body, yaw_rad)
     return drone_x + x_rel, drone_y + y_rel, drone_z + z_rel
 
 
-class DroneLink:
-    """One WiFi video connection + ArUco pipeline for a single drone."""
+def pixel_ray_to_world(u, v, camera_matrix, drone_pose, ground_z=0.0):
+    """YOLO path: no known object size, so there's no metric depth from a
+    single frame -- instead cast a ray from the camera through pixel (u, v)
+    and intersect it with the horizontal plane z = ground_z (the object's
+    known/assumed height off the floor, e.g. 0 for something lying flat).
 
-    POSE_SYNC_TOLERANCE_SEC = 0.2
+    Returns (x, y, z) in world coordinates, or None if the ray doesn't hit the
+    plane in front of the camera (e.g. it points above the horizon, which
+    shouldn't normally happen at a 45 deg nose-down mount unless the drone is
+    heavily pitched/rolled -- see the level-flight assumption in
+    _rotate_body_to_world_yaw)."""
+    drone_x, drone_y, drone_z, yaw_rad = drone_pose
+    fx, fy = camera_matrix[0, 0], camera_matrix[1, 1]
+    cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
+    d_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=np.float64)
+    d_body = R_CAM_TO_BODY @ d_cam
+    dx, dy, dz = _rotate_body_to_world_yaw(d_body, yaw_rad)
+
+    if abs(dz) < 1e-9:
+        return None  # ray is parallel to the ground plane, no intersection
+    t = (ground_z - drone_z) / dz
+    if t <= 0:
+        return None  # plane is behind the camera along this ray
+    return drone_x + t * dx, drone_y + t * dy, ground_z
+
+
+def _synthetic_marker_id(class_id, world_x, world_y, cluster_radius):
+    """YOLO has no persistent per-object identity (unlike an ArUco ID), so
+    stand-ins for it are minted by bucketing each detection's *computed world
+    position* into a `cluster_radius`-sized grid cell -- repeat sightings of
+    the same physical object land in the same bucket and dedupe the way
+    control_node already dedupes ArUco marker_ids (first-seen position wins).
+    This is a spatial approximation, not real tracking: two same-class objects
+    closer together than cluster_radius will collide into a single record.
+    Offset well clear of ArUco's 0-249 ID range and kept a positive int32."""
+    bucket_x = round(world_x / cluster_radius)
+    bucket_y = round(world_y / cluster_radius)
+    h = (class_id * 1_000_003) ^ (bucket_x * 92_821) ^ (bucket_y * 68_927)
+    return 1_000_000 + (h & 0x0FFFFFFF)
+
+
+class ArucoBackend:
+    """Wraps ArucoDetector into the common backend interface DroneLink uses:
+    process(frame, drone_pose) draws the overlay in place and returns
+    (results, raw_count) -- results is a list of {marker_id, x, y, z}
+    world-coordinate detections; raw_count is how many markers were visually
+    detected in this frame regardless of whether a synced drone_pose was
+    available to turn them into world coordinates (see DroneLink._process_frames,
+    which uses the raw_count vs len(results) gap to diagnose "GCS shows
+    nothing even though the target is clearly on camera" on real hardware)."""
+
+    def __init__(self, camera_matrix, dist_coeffs, marker_size_m):
+        self.detector = ArucoDetector(camera_matrix, dist_coeffs, marker_size_m)
+
+    def process(self, frame_bgr, drone_pose):
+        corners, ids = self.detector.detect_raw(frame_bgr)
+        poses = self.detector.solve_poses(corners, ids)
+        self.detector.draw_overlay(frame_bgr, corners, ids, poses)
+
+        results = []
+        if drone_pose is not None:
+            px, py, pz, pyaw = drone_pose
+            for pose in poses:
+                wx, wy, wz = marker_to_world(pose['tvec'], px, py, pz, pyaw)
+                results.append({'marker_id': pose['id'], 'x': wx, 'y': wy, 'z': wz})
+        return results, len(poses)
+
+
+class YoloBackend:
+    """Wraps YoloDetector + pixel_ray_to_world into the same interface as
+    ArucoBackend (see its docstring for the raw_count/results distinction)."""
+
+    def __init__(self, weights_path, camera_matrix, class_names, confidence_threshold,
+                 nms_threshold, input_size, target_height, cluster_radius):
+        self.yolo = YoloDetector(
+            weights_path, class_names, confidence_threshold, nms_threshold, input_size)
+        self.camera_matrix = camera_matrix
+        self.target_height = target_height
+        self.cluster_radius = cluster_radius
+
+    def process(self, frame_bgr, drone_pose):
+        detections = self.yolo.detect_raw(frame_bgr)
+        self._draw_overlay(frame_bgr, detections)
+
+        results = []
+        if drone_pose is not None:
+            for det in detections:
+                u, v = det['ground_px']
+                hit = pixel_ray_to_world(
+                    u, v, self.camera_matrix, drone_pose, self.target_height)
+                if hit is None:
+                    continue
+                wx, wy, wz = hit
+                marker_id = _synthetic_marker_id(det['class_id'], wx, wy, self.cluster_radius)
+                results.append({'marker_id': marker_id, 'x': wx, 'y': wy, 'z': wz})
+        return results, len(detections)
+
+    @staticmethod
+    def _draw_overlay(frame_bgr, detections):
+        for det in detections:
+            x, y, bw, bh = [int(round(v)) for v in det['bbox']]
+            cv2.rectangle(frame_bgr, (x, y), (x + bw, y + bh), (0, 200, 255), 1)
+            label = f"{det['class_name']} {det['confidence']:.2f}"
+            cv2.putText(
+                frame_bgr, label, (x, max(0, y - 4)), cv2.FONT_HERSHEY_SIMPLEX,
+                0.35, (0, 200, 255), 1, cv2.LINE_AA)
+
+
+class DroneLink:
+    """One WiFi video connection + detection pipeline for a single drone."""
+
+    # How stale the last /cfN/pose can be, relative to a frame's arrival time,
+    # before that frame's detections are dropped instead of turned into world
+    # coordinates (there's no pose to combine them with). WiFi video and radio
+    # telemetry are two independent, unsynchronized network streams -- each
+    # with its own real-world jitter -- so this was originally 0.2s (fine on a
+    # clean local sim run) but proved too tight on real hardware: the overlay
+    # box would show a clearly-detected target on the video panel while
+    # /detections (and therefore the GCS 3D view / marker list) stayed empty,
+    # because almost every frame missed the sync window. Widened to 0.5s: at
+    # typical COVERING speeds (cruise_speed ~0.05-0.1 m/s) that's still only a
+    # few cm of position lag, which is small next to the ray/solvePnP error
+    # this pipeline already has.
+    POSE_SYNC_TOLERANCE_SEC = 0.5
     # /cfN/pose streams at firmware_logging's configured pose frequency
     # (10Hz in crazyflies.yaml) whenever the radio link is actually up --
     # crazyswarm2 doesn't publish an explicit "radio connected" boolean, so
     # this node infers it from how stale the last received pose is instead.
     RADIO_STALE_SEC = 1.0
+    # Minimum gap between "detected but couldn't localize" warnings, so a
+    # steady stream of dropped frames doesn't spam the log.
+    POSE_DROP_WARN_INTERVAL_SEC = 3.0
 
-    def __init__(self, node, drone_id, wifi_ip, wifi_port, detector, bridge):
+    def __init__(self, node, drone_id, wifi_ip, wifi_port, backend, bridge):
         self.node = node
         self.drone_id = drone_id
         self.wifi_ip = wifi_ip
         self.wifi_port = wifi_port
-        self.detector = detector
+        self.backend = backend  # ArucoBackend or YoloBackend, see module docstring
         self.bridge = bridge
         self.latest_pose = None  # (x, y, z, yaw, wall_clock_stamp_sec)
         self.wifi_connected = False  # set from the background _run thread
+        self._last_pose_drop_warn = 0.0
         self.image_pub = node.create_publisher(Image, f'/{drone_id}/image_raw', 5)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -241,29 +397,40 @@ class DroneLink:
             elif frame_count % 100 == 0:
                 self.node.get_logger().info(f'{self.drone_id} {frame_count} frames received so far')
 
-            corners, ids = self.detector.detect_raw(frame)
-            poses = self.detector.solve_poses(corners, ids)
-            # Overlay every marker the detector saw (box + id), plus a pose
-            # axis for the ones with a usable solvePnP -- drawn in place so
-            # the published image always reflects what's on camera, whether
-            # or not that detection was good enough to also emit a
-            # /detections world-coordinate report below.
-            self.detector.draw_overlay(frame, corners, ids, poses)
-
-            if poses and self.latest_pose is not None:
+            # Overlay is drawn in place by process() regardless of whether a
+            # given detection is also good enough to emit a /detections
+            # world-coordinate report below, so the published image always
+            # reflects everything the backend saw on camera.
+            drone_pose = None
+            pose_gap = None
+            if self.latest_pose is not None:
                 px, py, pz, pyaw, pose_stamp = self.latest_pose
-                if abs(now - pose_stamp) < self.POSE_SYNC_TOLERANCE_SEC:
-                    for pose in poses:
-                        wx, wy, wz = marker_to_world(pose['tvec'], px, py, pz, pyaw)
-                        msg = MarkerDetection()
-                        msg.header.frame_id = 'map'
-                        msg.header.stamp = self.node.get_clock().now().to_msg()
-                        msg.drone_id = self.drone_id
-                        msg.marker_id = pose['id']
-                        msg.position.x = wx
-                        msg.position.y = wy
-                        msg.position.z = wz
-                        self.node.detections_pub.publish(msg)
+                pose_gap = abs(now - pose_stamp)
+                if pose_gap < self.POSE_SYNC_TOLERANCE_SEC:
+                    drone_pose = (px, py, pz, pyaw)
+            results, raw_count = self.backend.process(frame, drone_pose)
+
+            if raw_count > 0 and not results and now - self._last_pose_drop_warn > self.POSE_DROP_WARN_INTERVAL_SEC:
+                self._last_pose_drop_warn = now
+                if self.latest_pose is None:
+                    reason = 'no /cfN/pose received yet'
+                else:
+                    reason = f'last pose is {pose_gap:.2f}s old (limit {self.POSE_SYNC_TOLERANCE_SEC}s)'
+                self.node.get_logger().warn(
+                    f'{self.drone_id}: target visible on camera ({raw_count} detection(s)) but '
+                    f'not reported to GCS -- {reason}. Check the radio link/pose rate; this will '
+                    'not show up in /mission/markers or the GCS 3D view until pose syncs.')
+
+            for result in results:
+                msg = MarkerDetection()
+                msg.header.frame_id = 'map'
+                msg.header.stamp = self.node.get_clock().now().to_msg()
+                msg.drone_id = self.drone_id
+                msg.marker_id = result['marker_id']
+                msg.position.x = result['x']
+                msg.position.y = result['y']
+                msg.position.z = result['z']
+                self.node.detections_pub.publish(msg)
 
             img_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
             img_msg.header.frame_id = self.drone_id
@@ -281,18 +448,57 @@ class RealPerceptionNode(Node):
         self.declare_parameter('wifi_port', 5000)
         self.declare_parameter('marker_size', 0.14)
         self.declare_parameter('camera_intrinsics_path', '')
+        # detection_backend: 'aruco' (default) or 'yolo' -- see module
+        # docstring. Set via mission_map.yaml's `detection_backend` field,
+        # wired through by real.launch.py.
+        self.declare_parameter('detection_backend', 'aruco')
+        self.declare_parameter('yolo_weights_path', '')
+        self.declare_parameter('yolo_class_names', [''])
+        self.declare_parameter('yolo_confidence_threshold', 0.5)
+        self.declare_parameter('yolo_nms_threshold', 0.45)
+        self.declare_parameter('yolo_input_size', 640)
+        self.declare_parameter('yolo_target_height', 0.0)
+        self.declare_parameter('yolo_cluster_radius', 0.5)
 
         self.drone_ids = list(self.get_parameter('drone_ids').value)
         wifi_ips = list(self.get_parameter('wifi_ips').value)
         wifi_port = self.get_parameter('wifi_port').value
         marker_size = self.get_parameter('marker_size').value
+        detection_backend = self.get_parameter('detection_backend').value
 
         if len(wifi_ips) != len(self.drone_ids):
             raise RuntimeError('wifi_ips must have one entry per drone_id, same order')
 
         camera_matrix, dist_coeffs = self._load_intrinsics(
             self.get_parameter('camera_intrinsics_path').value)
-        detector = ArucoDetector(camera_matrix, dist_coeffs, marker_size)
+
+        # A fresh backend instance per drone (not one shared across all of
+        # them) -- each DroneLink runs its own thread, and neither
+        # cv2.aruco.ArucoDetector nor a cv2.dnn.Net is guaranteed safe to call
+        # concurrently from multiple threads on the same instance.
+        def build_backend():
+            if detection_backend == 'yolo':
+                weights_path = self.get_parameter('yolo_weights_path').value
+                if not weights_path:
+                    raise RuntimeError(
+                        "detection_backend is 'yolo' but yolo_weights_path is empty -- "
+                        'set mission_map.yaml\'s yolo.weights_path to an exported .onnx '
+                        'file (see docs/map_configuration.md)')
+                class_names = [n for n in self.get_parameter('yolo_class_names').value if n]
+                return YoloBackend(
+                    weights_path, camera_matrix, class_names,
+                    self.get_parameter('yolo_confidence_threshold').value,
+                    self.get_parameter('yolo_nms_threshold').value,
+                    self.get_parameter('yolo_input_size').value,
+                    self.get_parameter('yolo_target_height').value,
+                    self.get_parameter('yolo_cluster_radius').value)
+            elif detection_backend == 'aruco':
+                return ArucoBackend(camera_matrix, dist_coeffs, marker_size)
+            else:
+                raise RuntimeError(
+                    f"unknown detection_backend '{detection_backend}' -- "
+                    "must be 'aruco' or 'yolo'")
+
         bridge = CvBridge()
 
         self.states_pub = self.create_publisher(DroneState, '/states', 10)
@@ -300,11 +506,13 @@ class RealPerceptionNode(Node):
         self.link_status_pub = self.create_publisher(
             LinkStatusArray, '/mission/link_status', 10)
 
+        self.get_logger().info(f'real_perception_node using detection_backend={detection_backend}')
+
         self.links = {}
         self.pose_subs = []
         for drone_id, wifi_ip in zip(self.drone_ids, wifi_ips):
             self.links[drone_id] = DroneLink(
-                self, drone_id, wifi_ip, wifi_port, detector, bridge)
+                self, drone_id, wifi_ip, wifi_port, build_backend(), bridge)
             self.pose_subs.append(self.create_subscription(
                 PoseStamped, f'/{drone_id}/pose',
                 self._make_pose_callback(drone_id), 10))

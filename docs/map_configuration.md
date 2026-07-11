@@ -1,8 +1,8 @@
 # 실험 맵 구성 가이드
 
 실험실 공간에 맞는 맵(`mission_map.yaml`)을 만들 때 어떤 값을 어떻게 정해야 하는지,
-그리고 ArUco 마커 인식이 실제로 어떻게 동작하는지 정리한다. 실행 절차 자체는
-[RUNNING.md](RUNNING.md), 파이프라인 구조는 [README.md](../README.md) 참고.
+그리고 ArUco/YOLO 두 검출 백엔드가 실제로 어떻게 동작하는지 정리한다. 실행 절차
+자체는 [RUNNING.md](RUNNING.md), 파이프라인 구조는 [README.md](../README.md) 참고.
 
 > 이 문서는 **master 브랜치 기준**이다(ㄹ자 스윕 + 좌우 컬럼 밴드 분할). SCoPP
 > 영역할당/경로계획은 `feat/scopp-allocation-planning` 브랜치에만 있으며, 셀 크기·
@@ -15,8 +15,9 @@
 | 파일 | 무엇을 정하는가 | 언제 건드리나 |
 |---|---|---|
 | `ros2_ws/src/mission_bringup/config/mission_map.yaml` | 공간 크기, 셀 크기, 고도, 속도, 장애물 | **거의 모든 맵 튜닝** |
-| `ros2_ws/src/cf_perception/config/camera_intrinsics.yaml` | 마커 월드좌표의 정확도 | 실기체 캘리브레이션 시 (필수) |
+| `ros2_ws/src/cf_perception/config/camera_intrinsics.yaml` | 마커/객체 월드좌표의 정확도 | 실기체 캘리브레이션 시 (필수) |
 | `control_node`의 `arrival_radius` 파라미터(런치 파일에서 오버라이드) | "셀 방문 완료" 판정 반경 | 셀이 자꾸 안 채워질 때 |
+| `mission_map.yaml`의 `detection_backend`/`yolo.*` | ArUco vs YOLO 검출 백엔드 선택 | YOLO로 조난자 모형 등 실물체 인식 시 (8절) |
 
 ---
 
@@ -163,7 +164,13 @@ footprint_세로 = 2 · h · tan(FoV_세로 / 2)
 
 ---
 
-## 7. ArUco 마커 인식
+## 7. ArUco 마커 인식 (`detection_backend: aruco`)
+
+> `real_perception_node`는 `mission_map.yaml`의 `detection_backend`로 ArUco/YOLO를
+> 전환할 수 있다(둘 다 같은 `/detections` 토픽 계약을 쓴다). 이 절은 ArUco 백엔드,
+> 8절은 YOLO 백엔드를 다룬다. 셀 크기·화각·고도 같은 맵 전반의 내용(1~6절)은 두
+> 백엔드에 공통이다. sim은 어느 쪽을 골라도 항상 `true_markers.yaml` ground-truth를
+> 쓴다(카메라 이슈와 무관하게 맵 형상만 검증하기 위함).
 
 ### 7.1 마커는 "셀"이 아니라 **ID + 월드좌표**로 구분된다 ⭐
 
@@ -253,7 +260,136 @@ footprint_세로 = 2 · h · tan(FoV_세로 / 2)
 
 ---
 
-## 8. 실험실 맞춤 절차 (권장 순서)
+## 8. YOLO 기반 인식 (`detection_backend: yolo`)
+
+ArUco 마커 대신, 실제 조난자 모형처럼 마커가 없는 물체를 커스텀 학습한 YOLO 모델로
+찾을 때 쓴다. `mission_map.yaml`에서 전환:
+
+```yaml
+detection_backend: "yolo"
+
+yolo:
+  weights_path: ""            # 비우면 기본 모델(아래) 사용, 다른 모델 쓸 땐 절대경로 지정
+  class_names: ["survivor"]    # 오버레이 라벨용, 선택
+  confidence_threshold: 0.5
+  nms_threshold: 0.45
+  input_size: 640
+  target_height: 0.0        # 조난자 모형이 바닥에서 뜬 높이(m). 누워있으면 0에 가깝게
+  cluster_radius: 0.5        # 같은 클래스 중복검출 병합 반경(m)
+```
+
+가중치는 **onnx로만** 받는다(Ultralytics YOLOv8 기준 `model.export(format='onnx')`로
+뽑은 파일, 아래 8.4 참고). `weights_path`를 비워두면 `real.launch.py`가
+`cf_perception/cf_perception/weights/human_yolo11n_gray.onnx`(현재 기본 탑재 모델)를
+자동으로 쓴다 — `cf_perception/setup.py`가 이 디렉터리를 colcon 빌드 시 설치 경로로
+복사하고, 런치 파일이 `get_package_share_directory('cf_perception')` 기준으로 그
+설치된 경로를 하드코딩해서 찾는다(`camera_intrinsics_path`와 동일한 패턴). 다른
+모델을 쓰려면 `weights_path`에 그 `.onnx`의 절대경로를 지정하면 이 기본값을
+덮어쓴다. `.onnx` 파일은 저장소에 그대로 커밋한다 — 새 모델을 추가할 땐 파일만 그
+디렉터리에 놓고 `colcon build`를 다시 돌리면 된다.
+
+### 8.1 왜 ArUco와 완전히 다른 방식이 필요한가
+
+ArUco는 마커의 **알려진 물리 크기**(`marker_size`)를 이용해 solvePnP로 카메라 기준
+3D 위치(거리 포함)를 직접 푼다. YOLO는 바운딩박스 `(x, y, w, h)`만 주고 **깊이 정보가
+없다** — 한 장의 영상만으로는 "얼마나 멀리 있는 물체가 얼마나 큰지" 알 수 없기
+때문이다(사용자가 정확히 지적한 지점). 그래서 다른 방법으로 깊이를 메운다:
+
+**드론의 고도(=카메라 위치)를 알고 있으므로, 카메라 광선을 지면 평면과 교차시켜
+깊이를 계산한다.** ArUco처럼 물체 자체의 크기를 재는 게 아니라, "이 픽셀 방향으로
+쏜 광선이 바닥높이 `target_height`와 만나는 지점"을 3D 위치로 삼는 것이다.
+
+```
+바운딩박스 하단중앙 픽셀 (u, v)
+  → 카메라 좌표계 광선 방향 d_cam = ((u-cx)/fx, (v-cy)/fy, 1)
+  → 45° 마운트 회전 + 드론 yaw로 d_world 계산 (ArUco와 같은 R_CAM_TO_BODY 재사용)
+  → 드론 위치에서 이 방향으로 나아가 z = target_height 평면과 만나는 지점 계산
+  → 그 지점이 물체의 월드 (x, y, z)
+```
+
+**바운딩박스 하단중앙**을 쓰는 이유: 물체가 바닥에 닿는 지점(발밑)이 박스 중앙보다
+기하학적으로 훨씬 정확하다. 박스 중앙을 쓰면 물체의 키(세로 크기)만큼 광선이 짧게
+잡혀 실제보다 드론에 가깝게(그리고 45° 비스듬한 시야에서는 앞뒤로도 어긋나게)
+계산된다.
+
+이 방식의 정확도는 **드론 고도·pose가 정확할수록, 그리고 물체가 실제로 `target_height`
+평면 근처에 있을수록** 좋아진다. 물체가 서 있거나(키가 있음) 기울어져 있으면 오차가
+커진다 — ArUco의 "마커 자체 크기로 거리를 직접 재는" 정확도와는 근본적으로 다른
+성격의 근사임을 감안할 것.
+
+### 8.2 한 화면에 여러 개 잡힐 때 — ArUco와의 결정적 차이 ⭐
+
+ArUco는 마커마다 **고유 ID**가 있어 완벽하게 구분된다. **YOLO는 클래스만 주고 개체
+식별자가 없다** — 조난자 모형이 여러 개 있으면 전부 같은 클래스("survivor")로
+검출되어, 무엇이 "같은 물체를 다시 본 것"이고 무엇이 "다른 물체"인지 YOLO 자체는
+모른다.
+
+이걸 보완하기 위해 이 코드는 **검출된 월드좌표를 `cluster_radius` 크기의 격자에
+버킷팅**해서 그 버킷을 사실상의 ID로 쓴다(`_synthetic_marker_id`). 같은 버킷에
+잡힌 검출은 같은 물체로 간주(ArUco처럼 첫 검출 좌표 채택), 다른 버킷은 다른
+물체로 기록된다.
+
+**이건 진짜 개체 추적이 아니라 공간적 근사다.** 함의:
+
+- **`cluster_radius`보다 가까이 있는 같은 클래스 물체 2개는 하나로 합쳐진다.**
+  조난자 모형을 서로 `cluster_radius`(기본 0.5 m)보다 멀리 떨어뜨려 배치해야
+  각각 별도로 기록된다.
+- 물체가 없는데 잘못 검출(오검출)되면, 그 잘못된 좌표가 그 버킷의 "물체"로
+  영구 기록된다 — ArUco보다 오검출에 더 취약하니 `confidence_threshold`를
+  현장에서 보며 조정하라.
+- 여러 셀/여러 물체가 한 화면에 잡히는 것 자체는 ArUco와 마찬가지로 **문제가 아니다**
+  — YOLO는 프레임 안의 모든 박스를 각각 독립적으로 검출하고, 각 박스가 각자의
+  픽셀 위치에서 독립적으로 지면 교차 계산을 거친다. "이 박스가 셀 몇 번에 속하는지"
+  따질 필요가 전혀 없다(7.1과 동일한 원리).
+
+### 8.3 파라미터 튜닝
+
+- **`confidence_threshold`**: 낮추면 더 많이 잡지만 오검출↑, 높이면 놓칠 수 있음.
+  현장에서 실제 모형으로 조정.
+- **`target_height`**: 물체가 바닥에서 뜬 높이. 조난자 모형이 바닥에 눕혀져 있으면
+  0에 가깝게, 세워둔 인형이면 대략 무게중심 높이로. 이 값이 틀리면 계산된 거리가
+  체계적으로 어긋난다(가까운 값이면 실제보다 짧게, 먼 값이면 길게).
+- **`cluster_radius`**: 배치할 물체 간 최소 간격보다 작게 잡아야 한다. 물체를
+  1 m 간격으로 배치할 계획이면 `cluster_radius`는 0.5 m 이하로.
+- **`input_size`**: 학습/추출(export) 시 사용한 입력 크기와 반드시 일치시켜라
+  (보통 640). 다르면 letterbox 스케일이 어긋나 좌표가 틀어진다.
+- 고도·45° 마운트가 인식 픽셀 크기에 미치는 영향은 7.3과 같은 기하이나, YOLO는
+  ArUco처럼 "마커 변 픽셀 수"로 계산되는 정형화된 인식 한계가 없다 — 실제 학습
+  데이터의 스케일 분포에 좌우되므로, 학습 시 사용한 고도/거리 범위와 실비행 고도를
+  맞추는 것이 가장 중요하다.
+
+### 8.4 ONNX 내보내기 관련 가정 (중요)
+
+이 코드의 후처리(`yolo_detector.py`)는 **Ultralytics YOLOv8 기본 내보내기 형식**을
+가정한다:
+
+```python
+from ultralytics import YOLO
+model = YOLO("survivor.pt")
+model.export(format="onnx")   # nms=True 옵션 주지 말 것
+```
+
+- 출력 텐서 1개, shape `(1, 4+클래스수, N)` (박스 xywh + 클래스별 점수, objectness
+  컬럼 없음).
+- 입력은 letterbox(정사각 캔버스에 종횡비 유지 리사이즈) + 0~1 정규화 + BGR→RGB.
+
+**다른 형식으로 내보냈다면**(예: `nms=True`로 NMS를 그래프에 포함, 또는 YOLOv5
+스타일 `(1, N, 5+nc)` objectness 포함 출력) 이 코드의 `YoloDetector._postprocess`가
+좌표를 잘못 해석한다 — 그 경우 `nms=False`(기본값)로 재추출하거나,
+`yolo_detector.py`의 후처리를 실제 출력 shape에 맞게 조정해야 한다. 새 가중치를
+넣을 때는 먼저 오버레이 영상(대시보드 영상 패널)에서 박스가 실제 물체 위치에
+제대로 그려지는지부터 확인하라.
+
+### 8.5 sim에서는 테스트할 수 없음
+
+`sim_perception_node`는 카메라 영상 자체를 다루지 않고 ground-truth 좌표를 바로
+쓴다 — YOLO 추론은 **실기체(`real.launch.py`)에서만** 동작한다. `.onnx` 로딩/
+추론 자체를 미리 검증하려면 별도 스크립트로 저장된 이미지에 대해
+`cv2.dnn.readNetFromONNX` + `net.forward()`를 돌려보는 것을 권장.
+
+---
+
+## 9. 실험실 맞춤 절차 (권장 순서)
 
 1. **원점·축 정하기**: 실험실 바닥 모서리 하나를 `(0,0)`으로, 두 벽 방향을 +x/+y로.
 2. **`boundary`**: 실제 벽보다 안쪽으로 여유를 두고 CCW로 입력(5절).
@@ -262,27 +398,33 @@ footprint_세로 = 2 · h · tan(FoV_세로 / 2)
    짧은 변의 1/2~2/3로 셀 크기 설정.
 5. **드론 수/배치**: `crazyflies.yaml`의 `enabled`로 대수 결정. 각 드론을 계산된
    zone 시작 셀에 heading +x로 물리 배치(2절).
-6. **마커 준비**: DICT_6X6_250에서 서로 다른 ID로 생성, 인식 거리(7.2)를 감안한
-   크기로 인쇄, `marker_size`를 실제 크기와 일치.
+6. **검출 백엔드 선택**(`detection_backend`):
+   - ArUco → DICT_6X6_250에서 서로 다른 ID로 생성, 인식 거리(7.2)를 감안한
+     크기로 인쇄, `marker_size`를 실제 크기와 일치.
+   - YOLO → `.onnx` 경로를 `yolo.weights_path`에 설정, 조난자 모형을
+     `cluster_radius`보다 멀리 서로 떨어뜨려 배치(8.2), `target_height` 설정(8.3).
 7. **카메라 캘리브**: `camera_intrinsics.yaml`을 실측값으로 교체(7.4). 마운트 각도
-   검증.
+   검증. (두 백엔드 모두 이 값을 공유한다.)
 8. **먼저 시뮬로 확인**: 같은 `mission_map.yaml`로 sim 실행해 스윕/커버리지/존
-   분할이 의도대로 나오는지 대시보드로 확인(sim은 마커를 ground-truth로 처리하므로
-   카메라 이슈와 분리해 맵 형상만 검증 가능).
-9. **실기체 저속 시험**: `cruise_speed`를 낮춰 시작, kill switch 준비, 마커를 알려진
+   분할이 의도대로 나오는지 대시보드로 확인(sim은 백엔드 설정과 무관하게 항상
+   ground-truth를 쓰므로 카메라/모델 이슈와 분리해 맵 형상만 검증 가능).
+9. **실기체 저속 시험**: `cruise_speed`를 낮춰 시작, kill switch 준비, 물체를 알려진
    위치에 두고 `/detections` 좌표를 대조.
-10. **셀 놓침/인식률 보며 반복 튜닝**(6·7절).
+10. **셀 놓침/인식률 보며 반복 튜닝**(6·7·8절).
 
 ---
 
-## 9. 트러블슈팅
+## 10. 트러블슈팅
 
 | 증상 | 가능한 원인 | 대응 |
 |---|---|---|
 | 셀이 안 채워짐(진행률 정체) | 추종 느슨, 셀 놓침 | `cruise_speed`↓ 또는 `arrival_radius`↑ (6절) |
 | 스윕이 장애물 위를 가로지름 | 데드존이 영역 한가운데 | 데드존을 구석으로(5절) / SCoPP 브랜치 사용 |
-| 마커가 아예 검출 안 됨 | 사전 불일치 / 너무 작음·멂 / 흐림 | DICT_6X6_250 확인, 마커 크기↑ 또는 고도↓, 속도↓(7.2) |
-| 마커 월드좌표가 틀림 | 미캘리브·`marker_size` 불일치·마운트 각도·pose 드리프트 | 7.4 순서로 점검 |
+| 마커가 아예 검출 안 됨(ArUco) | 사전 불일치 / 너무 작음·멂 / 흐림 | DICT_6X6_250 확인, 마커 크기↑ 또는 고도↓, 속도↓(7.2) |
+| 마커 월드좌표가 틀림(ArUco) | 미캘리브·`marker_size` 불일치·마운트 각도·pose 드리프트 | 7.4 순서로 점검 |
+| 물체가 아예 검출 안 됨(YOLO) | onnx 형식 불일치 / `confidence_threshold` 과함 / 학습 스케일과 실비행 스케일 차이 | 8.4 확인, 오버레이 영상으로 박스 확인, threshold 낮춰보기 |
+| 같은 물체가 여러 개로 잡힘 / 다른 물체가 하나로 합쳐짐(YOLO) | `cluster_radius`가 배치 간격과 안 맞음 | 8.2·8.3 참고해 `cluster_radius` 조정 또는 배치 간격 재조정 |
+| YOLO 좌표가 체계적으로 가깝거나 멀게 나옴 | `target_height`가 실제 물체 높이와 다름 | 8.3, `target_height` 재설정 |
 | 마커 위치가 좌우 반대 | 드론 배치 heading이 +x와 어긋남 | 물리 배치 방향 재확인(2절). 대시보드 x반사는 시각화일 뿐 |
 | 라인 사이 지면이 안 잡힘 | `line_spacing` > footprint | 셀 크기↓ 또는 고도↑(3.2) |
 | 드론이 벽에 박음 | `boundary`가 실벽에 너무 가까움 | 경계 마진↑(5절), kill switch(대시보드 KILL / `K`키) |
@@ -297,8 +439,11 @@ footprint_세로 = 2 · h · tan(FoV_세로 / 2)
 | 카메라 fx, fy | 320, 320 (**placeholder**) | `camera_intrinsics.yaml` |
 | 카메라 cx, cy | 162, 122 | `camera_intrinsics.yaml` |
 | 화각 (계산값) | 가로 ≈53.8°, 세로 ≈41.8° | fx/cx에서 유도 |
-| 카메라 마운트 | 정면 아래 45° | `real_perception_node.py` `R_CAM_TO_BODY` |
+| 카메라 마운트 | 정면 아래 45° | `real_perception_node.py` `R_CAM_TO_BODY` (ArUco/YOLO 공용) |
 | ArUco 사전 | DICT_6X6_250 (ID 0~249) | `real_perception_node.py` |
 | solvePnP 거리 상한 | slant 8 m 초과 시 폐기 | `ArucoDetector.solve_poses` |
+| YOLO 가정 onnx 형식 | Ultralytics 기본 export, `(1,4+nc,N)`, 640 입력 | `yolo_detector.py` (8.4) |
+| YOLO 기본 conf/nms 임계값 | 0.5 / 0.45 | `mission_map.yaml`의 `yolo.*` |
+| YOLO 기본 cluster_radius | 0.5 m | `mission_map.yaml`의 `yolo.cluster_radius` |
 | pose-프레임 동기 허용 | 0.2 s | `DroneLink.POSE_SYNC_TOLERANCE_SEC` |
 | 셀 방문 판정 반경 | 0.25 m (`arrival_radius`) | `control_node.py` |

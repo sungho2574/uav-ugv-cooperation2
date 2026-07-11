@@ -18,6 +18,10 @@ setup(
         # real_perception_node's camera_intrinsics_path (set by
         # real.launch.py to that installed path) fails with FileNotFoundError.
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        # Same reasoning for the YOLO .onnx weights -- real.launch.py resolves
+        # the default yolo_weights_path from this installed share/ location
+        # (see DEFAULT_YOLO_WEIGHTS_FILENAME there), not the source tree.
+        (os.path.join('share', package_name, 'weights'), glob('cf_perception/weights/*.onnx')),
     ],
     install_requires=['setuptools', 'PyYAML', 'numpy', 'opencv-python'],
     zip_safe=True,

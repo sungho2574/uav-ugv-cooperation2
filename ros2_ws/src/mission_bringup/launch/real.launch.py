@@ -43,6 +43,13 @@ from mission_control.zone_split import assign_cells_to_drones, build_cells
 # sim.launch.py's _compute_homes for why both sides compute independently.
 DEAD_ZONE_MARGIN = 0.15
 
+# Default YOLO weights, resolved via cf_perception's installed share/weights/
+# dir (see cf_perception/setup.py's data_files) rather than a source-tree
+# path, so it resolves correctly regardless of the launching cwd. Used
+# whenever mission_map.yaml's `yolo.weights_path` is left empty; set that
+# field to override with a different model without touching this file.
+DEFAULT_YOLO_WEIGHTS_FILENAME = 'human_yolo11n_gray.onnx'
+
 
 def _enabled_drone_ids(crazyflies_cfg):
     """Same source as sim.launch.py -- see there for why."""
@@ -159,6 +166,10 @@ def _build(context, *args, **kwargs):
         }],
     )
 
+    yolo_cfg = mission_map.get('yolo') or {}
+    default_yolo_weights_path = os.path.join(
+        perception_share, 'weights', DEFAULT_YOLO_WEIGHTS_FILENAME)
+    yolo_weights_path = yolo_cfg.get('weights_path') or default_yolo_weights_path
     perception_node = Node(
         package='cf_perception',
         executable='real_perception_node',
@@ -168,8 +179,19 @@ def _build(context, *args, **kwargs):
             'drone_ids': drone_ids,
             'wifi_ips': wifi_ips,
             'wifi_port': 5000,
-            'marker_size': 0.14,
+            # `marker_size` used to be hardcoded here (duplicating and
+            # ignoring mission_map.yaml's own marker_size field) -- now reads
+            # the one true source, same pattern as detection_backend/yolo.*.
+            'marker_size': mission_map.get('marker_size', 0.14),
             'camera_intrinsics_path': camera_intrinsics_path,
+            'detection_backend': mission_map.get('detection_backend', 'aruco'),
+            'yolo_weights_path': yolo_weights_path,
+            'yolo_class_names': yolo_cfg.get('class_names') or [''],
+            'yolo_confidence_threshold': float(yolo_cfg.get('confidence_threshold', 0.5)),
+            'yolo_nms_threshold': float(yolo_cfg.get('nms_threshold', 0.45)),
+            'yolo_input_size': int(yolo_cfg.get('input_size', 640)),
+            'yolo_target_height': float(yolo_cfg.get('target_height', 0.0)),
+            'yolo_cluster_radius': float(yolo_cfg.get('cluster_radius', 0.5)),
         }],
     )
 

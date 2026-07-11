@@ -4,9 +4,33 @@
 # from coverage.
 frame_id: "map"
 grid_resolution: 0.10
-uav_cruise_altitude: 1.0
+uav_cruise_altitude: 0.5 # meters -- 50cm
 coverage_line_spacing: 0.5
 marker_size: 0.14
+
+# Real-hardware object detection backend for real_perception_node (sim always
+# uses ground-truth from true_markers.yaml regardless of this setting -- see
+# sim_perception_node.py). See docs/map_configuration.md sec. 7 for full
+# tuning guidance for both backends.
+#   aruco - fiducial markers (DICT_6X6_250), persistent ID + solvePnP depth.
+#   yolo  - YOLOv8-ONNX object detector; no depth/ID from a single frame, so
+#           position comes from casting a ray through the camera to the
+#           ground plane (yolo.target_height) and identity is approximated by
+#           bucketing detections' world position (yolo.cluster_radius).
+# detection_backend: "aruco"
+detection_backend: "yolo"
+
+yolo:
+  # Empty -> real.launch.py defaults to cf_perception's installed
+  # share/weights/human_yolo11n_gray.onnx (see DEFAULT_YOLO_WEIGHTS_FILENAME
+  # there). Set an absolute path here to use a different model instead.
+  weights_path: ""
+  class_names: ["survivor"] # e.g. ["survivor"] -- optional, overlay labels only
+  confidence_threshold: 0.5
+  nms_threshold: 0.45
+  input_size: 640 # must match the size the .onnx was exported/trained at
+  target_height: 0.0 # object height off the floor, m (e.g. a lying-down survivor model)
+  cluster_radius: 0.5 # dedup radius, m -- same-class detections closer than this merge into one record
 
 # COVERING-phase streaming reference speed, m/s. Lower this if cells are
 # being missed (visited_indices gaps in /mission/progress): the drone

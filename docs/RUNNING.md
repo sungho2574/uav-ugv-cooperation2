@@ -76,8 +76,9 @@ ros2 launch mission_bringup sim.launch.py
 ## 5. 실기체 실행 전 추가 체크리스트
 
 - [ ] `real.launch.py`의 `wifi_ips` 플레이스홀더(`192.168.4.1/2/3`)를 각 AI-deck 실제 WiFi IP로 교체
-- [ ] `ros2_ws/src/cf_perception/config/camera_intrinsics.yaml`을 실제 카메라로 체커보드 캘리브레이션한 값으로 교체 (기본값은 미보정 placeholder — 그대로 쓰면 마커 world 좌표가 부정확함)
+- [ ] `ros2_ws/src/cf_perception/config/camera_intrinsics.yaml`을 실제 카메라로 체커보드 캘리브레이션한 값으로 교체 (기본값은 미보정 placeholder — 그대로 쓰면 마커/객체 world 좌표가 부정확함)
 - [ ] `cf_perception/cf_perception/real_perception_node.py`의 `R_CAM_TO_BODY` (45도 하향 장착 가정)가 실제 AI-deck 장착각과 일치하는지 확인, 다르면 회전행렬 재계산
+- [ ] `mission_map.yaml`의 `detection_backend`가 원하는 값(`aruco`/`yolo`)인지 확인. `yolo`인 경우 `yolo.weights_path`가 실제 존재하는 `.onnx` 파일을 가리키는지, `yolo.target_height`/`yolo.cluster_radius`가 실제 물체 배치와 맞는지 확인 (자세한 튜닝은 [map_configuration.md](map_configuration.md) 8절)
 - [ ] 각 Crazyflie 배터리 충전 상태, 프로펠러 상태 확인
 - [ ] `crazyflies.yaml`의 `firmware_params.commander.enHighLevel: 1`이 설정되어 있는지 (고수준 명령 `go_to`/`takeoff`/`land` 사용에 필수)
 - [ ] 모션캡처 없이 온보드 상태추정만 사용하므로(`mocap:=False`), 장시간 비행 시 위치 드리프트가 누적될 수 있음 — 임무 영역 크기와 예상 비행 시간을 고려해 사전에 지상에서 위치 정확도를 확인
@@ -130,6 +131,8 @@ ros2 service call /mission/start std_srvs/srv/Trigger
 | 시뮬에서 마커가 하나도 안 잡힘 | `true_markers.yaml` 좌표가 `boundary`/`dead_zones`와 실제로 겹치지 않는지, `coverage_line_spacing`이 마커를 지나치는 간격은 아닌지 |
 | GCS 3D 뷰에 zone/경로가 안 보임 | `/mission/zones`, `/mission/coverage_paths`가 실제 발행됐는지(`ros2 topic echo ... --once`), gcs_node가 해당 토픽에 대해 같은 QoS(Transient Local)로 구독 중인지(코드 그대로면 문제 없음) |
 | 실기체 영상은 뜨는데 마커 world 좌표가 명백히 틀림 | `camera_intrinsics.yaml` 캘리브레이션 여부, `R_CAM_TO_BODY` 장착각 가정, `/cfN/pose`와 프레임 캡처 시각 차이(0.2초 동기화 허용오차) 확인 |
+| `detection_backend: yolo`로 실행했는데 `RuntimeError: yolo_weights_path is empty` 등으로 죽음 | `mission_map.yaml`의 `yolo.weights_path`가 비어있거나 잘못된 경로 — 실제 존재하는 `.onnx` 파일의 절대경로로 설정 |
+| YOLO 백엔드에서 물체가 하나도 안 잡히거나 좌표가 이상함 | [map_configuration.md](map_configuration.md) 8절(특히 8.4 onnx export 형식 가정) 참고 |
 | 드론 위치가 시간이 지날수록 dashboard에서 서서히 어긋남 | 모션캡처 없이 온보드 추정치만 쓰는 구조의 알려진 한계(드리프트) — 임무 범위/시간을 줄이거나 외부 포지셔닝 시스템 도입 검토 |
 | 이륙 후 커버리지 도중 드론이 갑자기 비정상적으로 빠르게 튀어서 지도 밖으로 나가 멈춤 | `control_node`가 `/states`(실측 위치)를 받고 있는지 확인(`ros2 topic hz /states`) — 못 받으면 구간 소요시간을 "마지막 명령 목표에 이미 도착했다"는 가정만으로 계산해서, 실제 위치가 뒤처져 있을 때 `go_to`에 남은 거리에 비해 너무 짧은 `duration`이 전달되어 crazyswarm2가 불안정한 궤적을 계획할 수 있음. 그래도 재현되면 `cruise_speed`를 낮추거나 `min_leg_duration`/`leg_settle_margin`을 늘려서 여유를 더 주고 재시도 |
 | GCS를 한동안 켜두면 브라우저 탭이 죽음(백엔드는 계속 살아있음) | 오래된 버전의 알려진 버그(수정 완료) — zone/경로를 매 폴링(300ms)마다 THREE.js 지오메트리를 새로 만들면서 이전 것을 `dispose()`하지 않아 GPU 메모리가 계속 쌓이던 문제였음. 최신 `app.js`는 데이터가 실제로 바뀔 때만 다시 그리고 나머지는 교체 전 `dispose()`를 호출함. 이 증상이 재현되면 `git pull` 등으로 최신 `static/app.js`가 반영됐는지부터 확인 |

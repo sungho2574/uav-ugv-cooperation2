@@ -6,6 +6,13 @@ Only two things differ from sim.launch.py: the crazyswarm2 backend
 WiFi video + runs ArUco instead of checking a ground-truth file).
 control_node and gcs_dashboard are unchanged -- same message contracts.
 
+real_perception_node itself can run two ways, picked by mission_map.yaml's
+`perception_runtime` field: "native" (a plain ROS2 node, same as everything
+else here) or "docker" (inside the cf_perception:jetson container, for hosts
+like the Jetson where installing a JetPack-matched torch/ultralytics build
+natively is fragile) -- see _build_docker_perception_process and
+cf_perception/docker/.
+
 NOTE: `mocap` is left False, i.e. drones fly on their own onboard state
 estimate over radio (no external motion-capture / lighthouse positioning).
 Position will drift over time on real hardware without an external position
@@ -27,12 +34,14 @@ does, so without this every real drone would think it starts at (0,0,0)
 regardless of where it was placed.
 """
 import os
+import shutil
+import subprocess
 import tempfile
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, OpaqueFunction
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -113,6 +122,74 @@ def _generate_crazyflies_yaml(crazyflies_cfg, homes, base_crazyflies_path):
     return generated_path
 
 
+def _build_docker_perception_process(mission_map, perception_share, perception_params):
+    """perception_runtime: "docker" path -- runs real_perception_node inside
+    the cf_perception:jetson container (see cf_perception/docker/) instead of
+    as a native ROS2 node, for hosts (the Jetson) where a JetPack-matched
+    torch/ultralytics build is fragile to install directly. See
+    mission_map.yaml's perception_runtime comment for the native/docker
+    tradeoff and cf_perception/docker/Dockerfile.jetson for image details.
+
+    Unlike docker-compose.jetson.yml (a manual-testing convenience only),
+    this builds a plain `docker run` invocation directly so it can bind-mount
+    a fresh, mission-specific params.yaml (generated here from the exact same
+    perception_params dict the native path would hand to Node()) on every
+    launch, plus the camera intrinsics / YOLO weights files at their own
+    real, unmodified host paths -- host and container share the same
+    filesystem on the Jetson, so no path translation is needed, just mount
+    each file at an identical path on both sides.
+
+    Does NOT build the image itself -- a fresh build is far too slow to
+    happen inline on every mission launch. Build it once ahead of time with
+    `docker compose -f cf_perception/docker/docker-compose.jetson.yml build`
+    and this raises a clear error if that was never done.
+    """
+    docker_bin = shutil.which('docker')
+    if docker_bin is None:
+        raise RuntimeError(
+            "perception_runtime is 'docker' but no `docker` binary was found on PATH")
+
+    docker_image = mission_map.get('docker_image', 'cf_perception:jetson')
+    inspect = subprocess.run(
+        [docker_bin, 'image', 'inspect', docker_image],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if inspect.returncode != 0:
+        raise RuntimeError(
+            f"perception_runtime is 'docker' but image '{docker_image}' was not found -- "
+            'build it first with `docker compose -f '
+            'ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`')
+
+    fastdds_xml_path = os.path.join(perception_share, 'docker', 'fastdds_udp.xml')
+
+    # ROS2 params yaml, `/**:` wildcard so it applies regardless of the
+    # node's actual name/namespace -- same values the native Node(...) path
+    # would receive, just serialized instead of passed in-process.
+    fd, params_path = tempfile.mkstemp(prefix='real_perception_params_', suffix='.yaml')
+    with os.fdopen(fd, 'w') as f:
+        yaml.safe_dump({'/**': {'ros__parameters': perception_params}}, f)
+
+    cmd = [
+        docker_bin, 'run', '--rm',
+        '--network=host', '--ipc=host', '--runtime=nvidia',
+        '-e', f"ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')}",
+        '-e', f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp')}",
+        '-e', 'FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds_udp.xml',
+        '-e', f'PARAMS_FILE={params_path}',
+        '-v', f'{fastdds_xml_path}:/fastdds_udp.xml:ro',
+        '-v', f'{params_path}:{params_path}:ro',
+    ]
+    # Bind-mount at the same absolute path on both sides -- only if the file
+    # actually exists on this host (e.g. a custom yolo.weights_path set in
+    # mission_map.yaml that hasn't been copied to this particular machine
+    # yet would otherwise make `docker run` itself fail on a bad -v spec).
+    for path in (perception_params['camera_intrinsics_path'], perception_params['yolo_weights_path']):
+        if os.path.exists(path):
+            cmd += ['-v', f'{path}:{path}:ro']
+    cmd.append(docker_image)
+
+    return ExecuteProcess(cmd=cmd, output='screen')
+
+
 def _build(context, *args, **kwargs):
     bringup_share = get_package_share_directory('mission_bringup')
     perception_share = get_package_share_directory('cf_perception')
@@ -170,28 +247,38 @@ def _build(context, *args, **kwargs):
     default_yolo_weights_path = os.path.join(
         perception_share, 'weights', DEFAULT_YOLO_WEIGHTS_FILENAME)
     yolo_weights_path = yolo_cfg.get('weights_path') or default_yolo_weights_path
-    perception_node = Node(
-        package='cf_perception',
-        executable='real_perception_node',
-        name='real_perception_node',
-        output='screen',
-        parameters=[{
-            'drone_ids': drone_ids,
-            'wifi_ips': wifi_ips,
-            'wifi_port': 5000,
-            # `marker_size` used to be hardcoded here (duplicating and
-            # ignoring mission_map.yaml's own marker_size field) -- now reads
-            # the one true source, same pattern as detection_backend/yolo.*.
-            'marker_size': mission_map.get('marker_size', 0.14),
-            'camera_intrinsics_path': camera_intrinsics_path,
-            'detection_backend': mission_map.get('detection_backend', 'aruco'),
-            'yolo_weights_path': yolo_weights_path,
-            'yolo_confidence_threshold': float(yolo_cfg.get('confidence_threshold', 0.5)),
-            'yolo_nms_threshold': float(yolo_cfg.get('nms_threshold', 0.45)),
-            'yolo_target_height': float(yolo_cfg.get('target_height', 0.0)),
-            'yolo_cluster_radius': float(yolo_cfg.get('cluster_radius', 0.5)),
-        }],
-    )
+    perception_params = {
+        'drone_ids': drone_ids,
+        'wifi_ips': wifi_ips,
+        'wifi_port': 5000,
+        # `marker_size` used to be hardcoded here (duplicating and
+        # ignoring mission_map.yaml's own marker_size field) -- now reads
+        # the one true source, same pattern as detection_backend/yolo.*.
+        'marker_size': mission_map.get('marker_size', 0.14),
+        'camera_intrinsics_path': camera_intrinsics_path,
+        'detection_backend': mission_map.get('detection_backend', 'aruco'),
+        'yolo_weights_path': yolo_weights_path,
+        'yolo_confidence_threshold': float(yolo_cfg.get('confidence_threshold', 0.5)),
+        'yolo_nms_threshold': float(yolo_cfg.get('nms_threshold', 0.45)),
+        'yolo_target_height': float(yolo_cfg.get('target_height', 0.0)),
+        'yolo_cluster_radius': float(yolo_cfg.get('cluster_radius', 0.5)),
+    }
+    perception_runtime = mission_map.get('perception_runtime', 'native')
+    if perception_runtime == 'native':
+        perception_node = Node(
+            package='cf_perception',
+            executable='real_perception_node',
+            name='real_perception_node',
+            output='screen',
+            parameters=[perception_params],
+        )
+    elif perception_runtime == 'docker':
+        perception_node = _build_docker_perception_process(
+            mission_map, perception_share, perception_params)
+    else:
+        raise RuntimeError(
+            f"mission_map.yaml's perception_runtime is '{perception_runtime}' -- "
+            "must be 'native' or 'docker'")
 
     gcs_node = Node(
         package='gcs_dashboard',

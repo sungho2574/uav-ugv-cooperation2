@@ -22,6 +22,11 @@ setup(
         # the default yolo_weights_path from this installed share/ location
         # (see DEFAULT_YOLO_WEIGHTS_FILENAME there), not the source tree.
         (os.path.join('share', package_name, 'weights'), glob('cf_perception/weights/*.onnx')),
+        # fastdds_udp.xml is mounted into the perception_runtime: "docker"
+        # container by real.launch.py -- installed here so it resolves from
+        # get_package_share_directory('cf_perception') like everything else,
+        # not a source-tree-relative guess.
+        (os.path.join('share', package_name, 'docker'), ['docker/fastdds_udp.xml']),
     ],
     # `ultralytics` runs the YOLO .onnx graph with the same pre/postprocessing
     # it was trained/exported with (see yolo_detector.py) -- cv2.dnn was tried

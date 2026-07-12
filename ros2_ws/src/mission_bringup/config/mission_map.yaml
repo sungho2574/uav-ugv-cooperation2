@@ -20,6 +20,23 @@ marker_size: 0.14
 # detection_backend: "aruco"
 detection_backend: "yolo"
 
+# Where real_perception_node actually runs.
+#   native (default) - launched as a plain ROS2 node on this machine, same
+#     as every other node here. Use this on a laptop/dev machine where
+#     `pip install ultralytics` (which pulls torch) just works.
+#   docker - launched inside the cf_perception:jetson container (see
+#     cf_perception/docker/) instead, talking to the rest of the mission
+#     over ROS2 DDS via network_mode: host. Use this on the Jetson, where a
+#     JetPack-matched torch/ultralytics build is fragile to install natively
+#     but the ultralytics/ultralytics jetson-jetpack6 base image already has
+#     it working. Build the image once ahead of time with
+#     `docker compose -f ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`
+#     before launching with this set to "docker" -- real.launch.py does NOT
+#     build it automatically (way too slow to happen inline on every launch).
+perception_runtime: "native"
+# Only read when perception_runtime is "docker" -- the image tag built above.
+docker_image: "cf_perception:jetson"
+
 yolo:
   # Empty -> real.launch.py defaults to cf_perception's installed
   # share/weights/human_yolo11n_gray.onnx (see DEFAULT_YOLO_WEIGHTS_FILENAME

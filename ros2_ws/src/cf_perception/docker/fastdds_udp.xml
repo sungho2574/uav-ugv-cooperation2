@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS UDP-only transport profile for the cf_perception Jetson container
+  (see Dockerfile.jetson / docker-compose.jetson.yml / real.launch.py's
+  perception_runtime: "docker" path).
+
+  FastDDS defaults to Shared Memory (SHM) transport for same-host communication.
+  SHM transport requires file-descriptor passing via Unix socket — this fails
+  between the container and the host even with ipc: host, because the FD exchange
+  uses a socket path that is not mutually reachable.
+
+  Forcing UDPv4-only works correctly with network_mode: host, letting the
+  containerized real_perception_node see control_node/gcs_dashboard/
+  crazyflie_server running natively on the same Jetson.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_transport</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="participant_profile" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>udp_transport</transport_id>
+      </userTransports>
+      <!-- Disable built-in transports (SHM + UDP) so only udp_transport is used -->
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

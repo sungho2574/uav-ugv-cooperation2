@@ -1,0 +1,41 @@
+# Manual/standalone helper for the cf_perception Jetson container.
+#
+# real.launch.py's perception_runtime: "docker" path does NOT use this file
+# -- it calls `docker run` directly so it can generate and bind-mount a
+# fresh, mission-specific params.yaml (drone_ids, wifi_ips, detection
+# backend, etc.) on every launch. This compose file is only for:
+#   1. Building the image ahead of time (required before setting
+#      perception_runtime: "docker" -- real.launch.py never builds it
+#      automatically, a fresh build is far too slow to happen inline on
+#      every mission launch):
+#        cd ros2_ws/src/cf_perception/docker
+#        docker compose -f docker-compose.jetson.yml build
+#   2. Manually running/debugging the container against a hand-written
+#      params.yaml, outside of a full mission launch:
+#        PARAMS_FILE=/path/to/params.yaml docker compose -f docker-compose.jetson.yml up
+services:
+  cf_perception:
+    build:
+      context: ../..           # ros2_ws/src/ -- see Dockerfile.jetson's header
+      dockerfile: cf_perception/docker/Dockerfile.jetson
+    image: cf_perception:jetson
+
+    # network_mode: host -- the container's ROS2 DDS participant needs to see
+    # control_node/gcs_dashboard/crazyflie_server running natively on the
+    # Jetson host, and needs to reach each AI-deck's WiFi AP IP directly.
+    # ipc: host -- see fastdds_udp.xml for why SHM transport still can't be
+    # used across the container boundary even with this set.
+    network_mode: host
+    ipc: host
+
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds_udp.xml
+      - PARAMS_FILE=${PARAMS_FILE:-/params.yaml}
+    volumes:
+      - ./fastdds_udp.xml:/fastdds_udp.xml:ro
+      - ${PARAMS_FILE:-./params.yaml}:${PARAMS_FILE:-/params.yaml}:ro
+    restart: "no"

@@ -9,6 +9,7 @@
 3. [실행 전 체크리스트 (공통)](#3-실행-전-체크리스트-공통)
 4. [시뮬레이션 실행](#4-시뮬레이션-실행)
 5. [실기체 실행 전 추가 체크리스트](#5-실기체-실행-전-추가-체크리스트)
+   - 5-1. [젯슨에서 실행할 때 (Docker로 YOLO 백엔드 돌리기)](#5-1-젯슨에서-실행할-때-docker로-yolo-백엔드-돌리기)
 6. [실기체 실행](#6-실기체-실행)
 7. [대시보드 사용법](#7-대시보드-사용법)
 8. [상태 확인용 CLI 명령](#8-상태-확인용-cli-명령)
@@ -86,11 +87,27 @@ ros2 launch mission_bringup sim.launch.py
 - [ ] `ros2_ws/src/cf_perception/config/camera_intrinsics.yaml`을 실제 카메라로 체커보드 캘리브레이션한 값으로 교체 (기본값은 미보정 placeholder — 그대로 쓰면 마커/객체 world 좌표가 부정확함)
 - [ ] `cf_perception/cf_perception/real_perception_node.py`의 `R_CAM_TO_BODY` (45도 하향 장착 가정)가 실제 AI-deck 장착각과 일치하는지 확인, 다르면 회전행렬 재계산
 - [ ] `mission_map.yaml`의 `detection_backend`가 원하는 값(`aruco`/`yolo`)인지 확인. `yolo`인 경우 `yolo.weights_path`가 실제 존재하는 `.onnx` 파일을 가리키는지, `yolo.target_height`/`yolo.cluster_radius`가 실제 물체 배치와 맞는지 확인 (자세한 튜닝은 [map_configuration.md](map_configuration.md) 8절)
+- [ ] `mission_map.yaml`의 `perception_runtime`이 이 머신에 맞는 값인지 확인 (`native` 기본값 / 젯슨은 `docker` — 아래 5-1절 참고). `docker`인 경우 이미지를 미리 빌드해뒀는지 확인
 - [ ] 각 Crazyflie 배터리 충전 상태, 프로펠러 상태 확인
 - [ ] `crazyflies.yaml`의 `firmware_params.commander.enHighLevel: 1`이 설정되어 있는지 (고수준 명령 `go_to`/`takeoff`/`land` 사용에 필수)
 - [ ] 모션캡처 없이 온보드 상태추정만 사용하므로(`mocap:=False`), 장시간 비행 시 위치 드리프트가 누적될 수 있음 — 임무 영역 크기와 예상 비행 시간을 고려해 사전에 지상에서 위치 정확도를 확인
 - [ ] Crazyradio PA가 3대 모두와 통신 가능한 범위/채널인지 확인
 - [ ] 비상 정지 방법(조종기, `ros2 service call /all/emergency std_srvs/srv/Empty` 등) 숙지 후 이륙
+
+### 5-1. 젯슨에서 실행할 때 (Docker로 YOLO 백엔드 돌리기)
+
+젯슨은 JetPack 버전에 맞는 torch/ultralytics 빌드를 네이티브로 설치하기 까다로워서, `real_perception_node`만 따로 컨테이너(`cf_perception:jetson`, base: `ultralytics/ultralytics:latest-jetson-jetpack6`)에서 돌릴 수 있게 해뒀다. `control_node`/`gcs_dashboard`/crazyswarm2는 그대로 젯슨 호스트에서 네이티브로 돌고, 컨테이너는 `network_mode: host`로 붙어서 같은 ROS2 DDS로 통신한다 (`cf_perception/docker/fastdds_udp.xml`로 SHM 대신 UDP 강제).
+
+1. `crazyswarm2`(`crazyflie_interfaces` 포함)가 이미 `ros2_ws/src/`에 소스로 존재해야 한다 (1절 사전 준비물과 동일 요구사항 — 도커 빌드 컨텍스트가 `ros2_ws/src/`라 거기서 같이 COPY됨).
+2. 이미지를 한 번 빌드해둔다 (미션 launch 시점에 자동 빌드 안 됨 — 매번 하기엔 너무 느림):
+   ```bash
+   cd ros2_ws/src/cf_perception/docker
+   docker compose -f docker-compose.jetson.yml build
+   ```
+3. `mission_map.yaml`의 `perception_runtime: "docker"`로 설정 (기본은 `"native"`).
+4. 평소처럼 `ros2 launch mission_bringup real.launch.py` 실행 — `real_perception_node`만 자동으로 `docker run`으로 뜨고, 나머지는 네이티브로 뜬다 (`real.launch.py`의 `_build_docker_perception_process` 참고). 실행 시점에 그때그때 `drone_ids`/`wifi_ips`/`detection_backend`/`yolo.*` 값을 담은 params yaml을 생성해서 컨테이너에 마운트하므로, `mission_map.yaml`을 고치면 다음 launch부터 바로 반영된다.
+
+이미지를 안 빌드해뒀거나 `docker` 바이너리가 없으면 launch 시점에 명확한 에러 메시지로 실패한다 (조용히 네이티브로 폴백하지 않음).
 
 ## 6. 실기체 실행
 
@@ -140,6 +157,9 @@ ros2 service call /mission/start std_srvs/srv/Trigger
 | 실기체 영상은 뜨는데 마커 world 좌표가 명백히 틀림 | `camera_intrinsics.yaml` 캘리브레이션 여부, `R_CAM_TO_BODY` 장착각 가정, `/cfN/pose`와 프레임 캡처 시각 차이(0.2초 동기화 허용오차) 확인 |
 | `detection_backend: yolo`로 실행했는데 `RuntimeError: yolo_weights_path is empty` 등으로 죽음 | `mission_map.yaml`의 `yolo.weights_path`가 비어있거나 잘못된 경로 — 실제 존재하는 `.onnx` 파일의 절대경로로 설정 |
 | YOLO 백엔드에서 물체가 하나도 안 잡히거나 좌표가 이상함 | [map_configuration.md](map_configuration.md) 8절(특히 8.4 onnx export 형식 가정) 참고 |
+| `perception_runtime: docker`인데 launch가 `image ... was not found`로 죽음 | 5-1절대로 `docker compose -f ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`를 먼저 실행했는지 확인 (자동 빌드 안 함) |
+| `perception_runtime: docker`인데 `no \`docker\` binary was found on PATH`로 죽음 | 젯슨에 Docker Engine + NVIDIA Container Toolkit 설치 여부 확인 |
+| 도커 컨테이너의 `real_perception_node`가 떠도 `control_node`/`gcs_dashboard`에서 `/states`, `/detections`, `/mission/link_status`가 안 보임 | 컨테이너가 호스트와 같은 `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`을 쓰는지(launch가 호스트 환경변수를 그대로 전달함) 확인, `docker run` 로그에 FastDDS 관련 에러가 있는지 확인 (`fastdds_udp.xml`이 `/fastdds_udp.xml`로 잘 마운트됐는지) |
 | 드론 위치가 시간이 지날수록 dashboard에서 서서히 어긋남 | 모션캡처 없이 온보드 추정치만 쓰는 구조의 알려진 한계(드리프트) — 임무 범위/시간을 줄이거나 외부 포지셔닝 시스템 도입 검토 |
 | 이륙 후 커버리지 도중 드론이 갑자기 비정상적으로 빠르게 튀어서 지도 밖으로 나가 멈춤 | `control_node`가 `/states`(실측 위치)를 받고 있는지 확인(`ros2 topic hz /states`) — 못 받으면 구간 소요시간을 "마지막 명령 목표에 이미 도착했다"는 가정만으로 계산해서, 실제 위치가 뒤처져 있을 때 `go_to`에 남은 거리에 비해 너무 짧은 `duration`이 전달되어 crazyswarm2가 불안정한 궤적을 계획할 수 있음. 그래도 재현되면 `cruise_speed`를 낮추거나 `min_leg_duration`/`leg_settle_margin`을 늘려서 여유를 더 주고 재시도 |
 | GCS를 한동안 켜두면 브라우저 탭이 죽음(백엔드는 계속 살아있음) | 오래된 버전의 알려진 버그(수정 완료) — zone/경로를 매 폴링(300ms)마다 THREE.js 지오메트리를 새로 만들면서 이전 것을 `dispose()`하지 않아 GPU 메모리가 계속 쌓이던 문제였음. 최신 `app.js`는 데이터가 실제로 바뀔 때만 다시 그리고 나머지는 교체 전 `dispose()`를 호출함. 이 증상이 재현되면 `git pull` 등으로 최신 `static/app.js`가 반영됐는지부터 확인 |

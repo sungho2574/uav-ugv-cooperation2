@@ -129,7 +129,12 @@ class GcsNode(Node):
         self.create_subscription(
             CoveragePathArray, '/mission/coverage_paths', self._on_paths, LATCHED_QOS)
         self.create_subscription(DroneProgressArray, '/mission/progress', self._on_progress, 10)
-        self.create_subscription(String, '/mission/state', self._on_mission_state, 10)
+        # Latched to match control_node's state_pub -- state transitions are
+        # each published once on entry, not repeated, so a non-latched
+        # subscriber that (re)connects afterward would miss it and stay stuck
+        # on the UNKNOWN default forever even though control_node already
+        # moved on (e.g. to AWAITING_START).
+        self.create_subscription(String, '/mission/state', self._on_mission_state, LATCHED_QOS)
         self.create_subscription(
             LinkStatusArray, '/mission/link_status', self._on_link_status, 10)
 

@@ -239,7 +239,13 @@ class ControlNode(Node):
             CoveragePathArray, '/mission/coverage_paths', LATCHED_QOS)
         self.markers_pub = self.create_publisher(
             MarkerRecordArray, '/mission/markers', LATCHED_QOS)
-        self.state_pub = self.create_publisher(String, '/mission/state', 10)
+        # Latched: state transitions (DECOMPOSE -> ... -> AWAITING_START -> ...)
+        # are each published exactly once on entry (_set_state), not repeated
+        # on a timer -- a plain non-latched publisher means any GCS that
+        # (re)connects after a transition already happened just never sees it
+        # and sits on the SharedState default ('UNKNOWN') forever, even though
+        # control_node's own log clearly shows it reached e.g. AWAITING_START.
+        self.state_pub = self.create_publisher(String, '/mission/state', LATCHED_QOS)
         # Authoritative "how far along its path is each drone" feed for the GCS --
         # this used to be *guessed* client-side from nearest-waypoint distance,
         # which is unreliable on a zig-zag path (many waypoints can be spatially

@@ -274,14 +274,36 @@ class ArucoBackend:
 
 class YoloBackend:
     """Wraps YoloDetector + pixel_ray_to_world into the same interface as
-    ArucoBackend (see its docstring for the raw_count/results distinction)."""
+    ArucoBackend (see its docstring for the raw_count/results distinction).
+
+    Unlike ArUco (a persistent per-marker ID straight from the tag), YOLO
+    re-detects the same physical target on practically every frame it's
+    visible in, and position noise (ray-ground jitter, drone pose noise)
+    means those repeat sightings don't always land in the exact same
+    _synthetic_marker_id bucket -- so relying solely on that hash to dedupe
+    let the same object get reported as "found" several times over. Instead,
+    this backend remembers which grid cells (see _synthetic_marker_id's
+    bucketing) have already produced a detection in self._found_cells, and
+    once a cell is marked found, every later detection landing in that same
+    cell is dropped -- first-seen-per-cell wins, same "found once, stays
+    found" semantics as control_node's marker dedup, but enforced at the
+    source instead of relying on GCS-side setdefault."""
 
     def __init__(self, weights_path, camera_matrix, confidence_threshold,
-                 nms_threshold, target_height, cluster_radius):
+                 nms_threshold, target_height, cluster_radius,
+                 found_cells, found_cells_lock):
         self.yolo = YoloDetector(weights_path, confidence_threshold, nms_threshold)
         self.camera_matrix = camera_matrix
         self.target_height = target_height
         self.cluster_radius = cluster_radius
+        # {(bucket_x, bucket_y), ...} already reported -- passed in from
+        # RealPerceptionNode and shared across every drone's YoloBackend
+        # instance (not one set per drone), so once any drone reports a cell
+        # as found, every other drone's later detections in that same cell
+        # are skipped too. Each DroneLink runs its own thread and they can
+        # all call process() concurrently, hence the shared lock.
+        self._found_cells = found_cells
+        self._found_cells_lock = found_cells_lock
 
     def process(self, frame_bgr, drone_pose):
         detections = self.yolo.detect_raw(frame_bgr)
@@ -296,6 +318,11 @@ class YoloBackend:
                 if hit is None:
                     continue
                 wx, wy, wz = hit
+                cell = (round(wx / self.cluster_radius), round(wy / self.cluster_radius))
+                with self._found_cells_lock:
+                    if cell in self._found_cells:
+                        continue  # already reported once (by any drone) -- skip
+                    self._found_cells.add(cell)
                 marker_id = _synthetic_marker_id(det['class_id'], wx, wy, self.cluster_radius)
                 results.append({'marker_id': marker_id, 'x': wx, 'y': wy, 'z': wz})
         return results, len(detections)
@@ -477,7 +504,13 @@ class RealPerceptionNode(Node):
         # A fresh backend instance per drone (not one shared across all of
         # them) -- each DroneLink runs its own thread, and neither
         # cv2.aruco.ArucoDetector nor a cv2.dnn.Net is guaranteed safe to call
-        # concurrently from multiple threads on the same instance.
+        # concurrently from multiple threads on the same instance. The
+        # found-cells set itself IS shared across drones though (see
+        # YoloBackend), so overlapping drones don't each report the same
+        # target -- only the set + its lock are common state.
+        yolo_found_cells = set()
+        yolo_found_cells_lock = threading.Lock()
+
         def build_backend():
             if detection_backend == 'yolo':
                 weights_path = self.get_parameter('yolo_weights_path').value
@@ -491,7 +524,8 @@ class RealPerceptionNode(Node):
                     self.get_parameter('yolo_confidence_threshold').value,
                     self.get_parameter('yolo_nms_threshold').value,
                     self.get_parameter('yolo_target_height').value,
-                    self.get_parameter('yolo_cluster_radius').value)
+                    self.get_parameter('yolo_cluster_radius').value,
+                    yolo_found_cells, yolo_found_cells_lock)
             elif detection_backend == 'aruco':
                 return ArucoBackend(camera_matrix, dist_coeffs, marker_size)
             else:

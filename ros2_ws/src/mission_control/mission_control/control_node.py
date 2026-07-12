@@ -301,12 +301,22 @@ class ControlNode(Node):
         self.live_xy[msg.drone_id] = (msg.position.x, msg.position.y)
 
     def _on_detection(self, msg):
-        if msg.marker_id not in self.detected_markers:
+        is_new = msg.marker_id not in self.detected_markers
+        if is_new:
             self.get_logger().info(
                 f'marker {msg.marker_id} detected by {msg.drone_id} at '
                 f'({msg.position.x:.2f}, {msg.position.y:.2f})')
         self.detected_markers[msg.marker_id] = (
             msg.position.x, msg.position.y, msg.position.z)
+        # Republish /mission/markers on every *new* marker (not just once at
+        # mission end via the PUBLISH_MARKERS state) -- latched, so a UGV
+        # consumer sees markers as they're found and can start routing to
+        # them mid-mission instead of waiting for the whole aerial sweep to
+        # finish. Skip on repeat sightings of an already-known marker (a
+        # position update to an existing id) to avoid republishing on every
+        # single detection frame.
+        if is_new:
+            self._publish_markers()
 
     def _on_start_request(self, request, response):
         self._start_requested = True
@@ -357,6 +367,9 @@ class ControlNode(Node):
             self._step_land(now)
         elif self.state == 'PUBLISH_MARKERS':
             self._publish_markers()
+            self.get_logger().info(
+                f'mission complete, {len(self.detected_markers)} markers found: '
+                f'{sorted(self.detected_markers.keys())}')
             self._set_state('DONE')
         elif self.state == 'DONE':
             pass
@@ -593,14 +606,15 @@ class ControlNode(Node):
             self._set_state('PUBLISH_MARKERS')
 
     def _publish_markers(self):
+        """Publishes the full current detected_markers set to /mission/markers
+        (latched) -- called both incrementally (see _on_detection, so a UGV
+        consumer sees markers as they're found) and once more at mission end
+        (PUBLISH_MARKERS state, which logs the final summary itself)."""
         array = MarkerRecordArray()
         for marker_id, (x, y, z) in self.detected_markers.items():
             array.markers.append(
                 MarkerRecord(marker_id=marker_id, position=Point(x=x, y=y, z=z)))
         self.markers_pub.publish(array)
-        self.get_logger().info(
-            f'mission complete, {len(array.markers)} markers found: '
-            f'{sorted(self.detected_markers.keys())}')
 
 
 def main(args=None):

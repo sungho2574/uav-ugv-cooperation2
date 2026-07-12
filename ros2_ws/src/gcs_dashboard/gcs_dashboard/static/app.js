@@ -477,10 +477,19 @@ function buildLegend(zones, linkStatus) {
   linkStatus = linkStatus || {};
   el.innerHTML = zones.map((z) => {
     const status = linkStatus[z.drone_id];
-    // 0.0/no entry -> sim, or real hardware with no /status message yet
-    // (see SharedState.link_status) -- render "unknown" (empty gray track),
-    // not a misleading 0%.
-    const voltage = status ? status.battery_voltage : 0;
+    // No entry at all -> sim (sim_perception_node never publishes
+    // /mission/link_status, see SharedState.link_status) -- skip the
+    // battery UI entirely rather than show a permanently-unknown "--".
+    // status present but battery_voltage still 0.0 -> real hardware that
+    // just hasn't gotten its first /status message yet -- show "--" since
+    // a reading should arrive soon.
+    if (!status) {
+      return `<div class="row">
+        <span class="swatch" style="background:${z.color}"></span>
+        <span class="drone-id">${z.drone_id}</span>
+      </div>`;
+    }
+    const voltage = status.battery_voltage;
     const known = voltage > 0;
     const pct = known ? voltageToPercent(voltage) : 0;
     const level = pct >= 50 ? 'ok' : pct >= 20 ? 'low' : 'critical';

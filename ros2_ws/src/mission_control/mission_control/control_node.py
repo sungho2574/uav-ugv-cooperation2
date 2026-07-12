@@ -4,9 +4,14 @@
 Single rclpy.Node that owns the whole mission from a cold start to landing:
 loads the known mission map, splits it into 3 zones (one per drone), plans a
 boustrophedon coverage path per zone, drives the 3 Crazyflies through
-crazyswarm2, collects ArUco detections published by whichever cf_perception
-node is running (sim or real, same topic contract), and publishes the final
-marker list for the (future) UGV routing node to consume.
+crazyswarm2, collects detections published by whichever cf_perception node is
+running (sim or real, same topic contract), and republishes each newly-found
+marker to /mission/markers (latched) as soon as it's detected -- not just
+once at mission end -- so the (future) UGV routing node can start routing to
+markers mid-mission instead of waiting for the whole aerial sweep to finish.
+The FSM has a placeholder AWAITING_UGV_DONE state before DONE for that same
+future UGV node to signal it's finished visiting everything; not implemented
+yet (falls straight through to DONE), just documenting where it goes.
 
 Coverage (the ㄹ-shape sweep) is flown as a single continuously-advancing
 *streamed* position reference (crazyflie_interfaces/FullState on
@@ -239,7 +244,7 @@ class ControlNode(Node):
             CoveragePathArray, '/mission/coverage_paths', LATCHED_QOS)
         self.markers_pub = self.create_publisher(
             MarkerRecordArray, '/mission/markers', LATCHED_QOS)
-        # Latched: state transitions (DECOMPOSE -> ... -> AWAITING_START -> ...)
+        # Latched: state transitions (PREPARE -> AWAITING_START -> ...)
         # are each published exactly once on entry (_set_state), not repeated
         # on a timer -- a plain non-latched publisher means any GCS that
         # (re)connects after a transition already happened just never sees it
@@ -277,13 +282,13 @@ class ControlNode(Node):
         self._killed = False
         self.kill_srv = self.create_service(Trigger, '/mission/kill', self._on_kill_request)
 
-        self.state = 'DECOMPOSE'
+        self.state = 'PREPARE'
         self._phase_deadline = None
         self._takeoff_sent = False
         self._land_sent = False
 
         self.timer = self.create_timer(0.1, self._tick)
-        self.get_logger().info('control_node started, state=DECOMPOSE')
+        self.get_logger().info('control_node started, state=PREPARE')
 
     # ---- setup -----------------------------------------------------
     def _load_mission_map(self, path):
@@ -309,12 +314,11 @@ class ControlNode(Node):
         self.detected_markers[msg.marker_id] = (
             msg.position.x, msg.position.y, msg.position.z)
         # Republish /mission/markers on every *new* marker (not just once at
-        # mission end via the PUBLISH_MARKERS state) -- latched, so a UGV
-        # consumer sees markers as they're found and can start routing to
-        # them mid-mission instead of waiting for the whole aerial sweep to
-        # finish. Skip on repeat sightings of an already-known marker (a
-        # position update to an existing id) to avoid republishing on every
-        # single detection frame.
+        # mission end) -- latched, so a UGV consumer sees markers as they're
+        # found and can start routing to them mid-mission instead of waiting
+        # for the whole aerial sweep to finish. Skip on repeat sightings of
+        # an already-known marker (a position update to an existing id) to
+        # avoid republishing on every single detection frame.
         if is_new:
             self._publish_markers()
 
@@ -345,13 +349,9 @@ class ControlNode(Node):
         if self._killed:
             return
         now = time.monotonic()
-        if self.state == 'DECOMPOSE':
+        if self.state == 'PREPARE':
             self._do_decompose()
-            self._set_state('PLAN')
-        elif self.state == 'PLAN':
             self._do_plan()
-            self._set_state('PUBLISH_PLAN')
-        elif self.state == 'PUBLISH_PLAN':
             self._publish_plan()
             self._set_state('AWAITING_START')
         elif self.state == 'AWAITING_START':
@@ -365,11 +365,17 @@ class ControlNode(Node):
             self._step_return_home(now)
         elif self.state == 'LAND':
             self._step_land(now)
-        elif self.state == 'PUBLISH_MARKERS':
-            self._publish_markers()
+        elif self.state == 'AWAITING_UGV_DONE':
+            # Placeholder for the (future) UGV routing node's completion signal
+            # -- once that node exists, this should block here (e.g. on a
+            # /mission/ugv_done service/topic) instead of falling straight
+            # through to DONE. Not implemented yet: there's no UGV node to
+            # signal completion, so this is documentation of the intended
+            # state, not real wait logic. See README's FUTURE UGV routing node.
             self.get_logger().info(
-                f'mission complete, {len(self.detected_markers)} markers found: '
-                f'{sorted(self.detected_markers.keys())}')
+                f'aerial mission complete, {len(self.detected_markers)} markers found: '
+                f'{sorted(self.detected_markers.keys())} -- '
+                'UGV completion wait not implemented yet, proceeding to DONE')
             self._set_state('DONE')
         elif self.state == 'DONE':
             pass
@@ -603,13 +609,13 @@ class ControlNode(Node):
             self._phase_deadline = now + self.land_duration + self.land_settle_time
             self.get_logger().info('land sent to all drones')
         elif now >= self._phase_deadline:
-            self._set_state('PUBLISH_MARKERS')
+            self._set_state('AWAITING_UGV_DONE')
 
     def _publish_markers(self):
         """Publishes the full current detected_markers set to /mission/markers
-        (latched) -- called both incrementally (see _on_detection, so a UGV
-        consumer sees markers as they're found) and once more at mission end
-        (PUBLISH_MARKERS state, which logs the final summary itself)."""
+        (latched) -- called incrementally as each new marker is found (see
+        _on_detection), so a UGV consumer sees markers as they're found
+        instead of waiting for the whole aerial mission to finish."""
         array = MarkerRecordArray()
         for marker_id, (x, y, z) in self.detected_markers.items():
             array.markers.append(

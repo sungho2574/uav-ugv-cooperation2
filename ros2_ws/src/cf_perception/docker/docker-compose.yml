@@ -22,6 +22,15 @@ services:
       # expected layout; crazyflie_interfaces can't be reached otherwise.
       context: ../../../../..
       dockerfile: uav-ugv-cooperation2/ros2_ws/src/cf_perception/docker/Dockerfile
+      # This project never needs Docker's default bridge network (the
+      # container only ever runs with network_mode: host below) -- building
+      # with the host network too means the RUN apt-get/pip steps get real
+      # internet access straight from the host's own network stack, without
+      # Docker having to set up any bridge/NAT iptables rules. Needed on
+      # hosts (some Jetson L4T kernels) where the netfilter xtables setup is
+      # broken enough that Docker can't even create its default bridge
+      # network at all -- see docs/RUNNING.md 5-1 for the full story.
+      network: host
     image: cf_perception:jetson
 
     # network_mode: host -- the container's ROS2 DDS participant needs to see

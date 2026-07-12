@@ -127,7 +127,7 @@ flowchart TD
 
 | 패키지             | 노드                   | 실행 파일              | 역할                                                                                                            |
 | ------------------ | ---------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `mission_control`  | `control_node`         | `control_node`         | 지도 로드 → 영역분할 → 경로계획 → 발행 → 이륙/커버리지/복귀/착륙 지휘 → 최종 마커 발행. 유일한 중앙 상태머신    |
+| `mission_control`  | `control_node`         | `control_node`         | 지도 로드 → 영역분할 → 경로계획+발행 → 이륙/커버리지(마커 발견 즉시 발행)/복귀/착륙 지휘. 유일한 중앙 상태머신    |
 | `cf_perception`    | `sim_perception_node`  | `sim_perception_node`  | (시뮬) `/cfN/pose` → `/states` 중계, ground-truth 마커와 거리 비교해 `/detections` 발행                         |
 | `cf_perception`    | `real_perception_node` | `real_perception_node` | (실기체) `/cfN/pose` → `/states` 중계, AI-deck WiFi 영상 수신+ArUco 검출 → `/detections`, `/cfN/image_raw` 발행 |
 | `gcs_dashboard`    | `gcs_node`             | `gcs_node`             | ROS 토픽을 스레드락 걸린 상태로 모아 Flask REST API로 노출, 브라우저의 Three.js 3D 대시보드에 서빙              |
@@ -168,52 +168,46 @@ flowchart TD
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DECOMPOSE
-    DECOMPOSE --> PLAN
-    PLAN --> PUBLISH_PLAN
-    PUBLISH_PLAN --> AWAITING_START
+    [*] --> PREPARE
+    PREPARE --> AWAITING_START
     AWAITING_START --> TAKEOFF
     TAKEOFF --> COVERING
     COVERING --> COVERING
     COVERING --> RETURN_HOME
     RETURN_HOME --> LAND
-    LAND --> PUBLISH_MARKERS
-    PUBLISH_MARKERS --> DONE
+    LAND --> AWAITING_UGV_DONE
+    AWAITING_UGV_DONE --> DONE
     DONE --> [*]
 ```
 
-> 참고: 지도 로드 및 crazyswarm2 서비스 클라이언트 생성은 노드 생성자(`__init__`)에서 동기적으로 끝나는 준비 단계이며, 타이머 기반 FSM은 `DECOMPOSE`부터 시작한다.
+> 참고: 지도 로드 및 crazyswarm2 서비스 클라이언트 생성은 노드 생성자(`__init__`)에서 동기적으로 끝나는 준비 단계이며, 타이머 기반 FSM은 `PREPARE`부터 시작한다.
 
 ### 4.2 상태 전이 조건 다이어그램
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DECOMPOSE: 노드 생성자 완료(지도 로드,<br>서비스 클라이언트 준비)
-    DECOMPOSE --> PLAN: 항상 (zone_split 완료)
-    PLAN --> PUBLISH_PLAN: 항상 (coverage_plan 완료)
-    PUBLISH_PLAN --> AWAITING_START: 항상 (zones/paths 토픽 발행 완료)
+    [*] --> PREPARE: 노드 생성자 완료(지도 로드,<br>서비스 클라이언트 준비)
+    PREPARE --> AWAITING_START: 항상 (zone_split+coverage_plan 계산 +<br>zones/paths 토픽 발행 완료)
     AWAITING_START --> TAKEOFF: /mission/start 서비스 호출됨<br>(또는 start_immediately=true)
     TAKEOFF --> COVERING: takeoff 전송 후<br>takeoff_duration+takeoff_settle_time 경과
     COVERING --> COVERING: leg_deadline 경과 &&<br>일부 드론 waypoint 남음
     COVERING --> RETURN_HOME: 모든 드론 waypoint 소진(done=true)
     RETURN_HOME --> LAND: 홈 이동 명령 후<br>소요시간+leg_settle_margin 경과
-    LAND --> PUBLISH_MARKERS: land 전송 후<br>land_duration+land_settle_time 경과
-    PUBLISH_MARKERS --> DONE: 항상 (/mission/markers 발행 완료)
+    LAND --> AWAITING_UGV_DONE: land 전송 후<br>land_duration+land_settle_time 경과
+    AWAITING_UGV_DONE --> DONE: 항상 (UGV 완료 대기 미구현,<br>바로 통과)
 ```
 
 ### 4.3 상태별 동작 정의
 
 | 상태              | 진입 시 동작                                                                                                                                                                                      | 사용 토픽/서비스                                 | 종료(다음 상태로) 조건                             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------- |
-| `DECOMPOSE`       | `mission_map.yaml` 기반 free-space 폴리곤 생성 후 `zone_split.assign_zones_to_drones()`로 3개 zone 산출                                                                                           | -                                                | 계산 완료 즉시                                     |
-| `PLAN`            | 각 드론 zone에 `coverage_plan.plan_coverage()` 적용해 boustrophedon waypoint 리스트 생성                                                                                                          | -                                                | 계산 완료 즉시                                     |
-| `PUBLISH_PLAN`    | `ZoneAssignmentArray` → `/mission/zones`, `CoveragePathArray` → `/mission/coverage_paths` 발행(latched)                                                                                           | Pub: `/mission/zones`, `/mission/coverage_paths` | 발행 완료 즉시                                     |
+| `PREPARE`         | `mission_map.yaml` 기반 free-space 폴리곤 생성 후 `zone_split.assign_zones_to_drones()`로 3개 zone 산출 → 각 zone에 `coverage_plan.plan_coverage()` 적용해 boustrophedon waypoint 리스트 생성 → `ZoneAssignmentArray` → `/mission/zones`, `CoveragePathArray` → `/mission/coverage_paths` 발행(latched) | Pub: `/mission/zones`, `/mission/coverage_paths` | 계산+발행 완료 즉시                                |
 | `AWAITING_START`  | 대기만 함                                                                                                                                                                                         | Srv 서버: `/mission/start`                       | GCS의 "Start Mission" 버튼 → `/mission/start` 호출 |
 | `TAKEOFF`         | 3대 모두 `/cfN/takeoff` 서비스 호출                                                                                                                                                               | Srv 클라이언트: `/cfN/takeoff`                   | `takeoff_duration + takeoff_settle_time` 경과      |
-| `COVERING`        | 드론별 다음 waypoint로 `/cfN/go_to` 동시 호출, 구간별 소요시간(`거리/cruise_speed`, 최소 `min_leg_duration`) 중 최댓값만큼 대기 후 반복. 그 사이 `/detections` 수신해 `marker_id` 기준 dedup 누적 | Srv 클라이언트: `/cfN/go_to`, Sub: `/detections` | 모든 드론이 자기 waypoint 리스트를 소진            |
+| `COVERING`        | 드론별 다음 waypoint로 `/cfN/go_to` 동시 호출, 구간별 소요시간(`거리/cruise_speed`, 최소 `min_leg_duration`) 중 최댓값만큼 대기 후 반복. 그 사이 `/detections` 수신해 `marker_id` 기준 dedup 누적, 새 마커면 그 즉시 `/mission/markers`도 재발행(latched) | Srv 클라이언트: `/cfN/go_to`, Sub: `/detections`, Pub: `/mission/markers` | 모든 드론이 자기 waypoint 리스트를 소진            |
 | `RETURN_HOME`     | 3대 모두 홈 위치로 `/cfN/go_to` 호출                                                                                                                                                              | Srv 클라이언트: `/cfN/go_to`                     | 이동 소요시간 + `leg_settle_margin` 경과           |
 | `LAND`            | 3대 모두 `/cfN/land` 호출                                                                                                                                                                         | Srv 클라이언트: `/cfN/land`                      | `land_duration + land_settle_time` 경과            |
-| `PUBLISH_MARKERS` | 누적된 `detected_markers`를 `MarkerRecordArray`로 `/mission/markers`에 발행(latched)                                                                                                              | Pub: `/mission/markers`                          | 발행 완료 즉시                                     |
+| `AWAITING_UGV_DONE` | (추후) UGV 라우팅 노드의 탐색 완료 신호를 기다리는 자리 -- 아직 UGV 노드가 없어서 실제 대기 로직은 미구현, 진입 즉시 `DONE`으로 통과. `mission_control/control_node.py`의 해당 상태 주석 참고 | -                                                | 항상 (미구현, 즉시 통과)                            |
 | `DONE`            | 아무 것도 하지 않음(terminal)                                                                                                                                                                     | -                                                | -                                                  |
 
 ## 5. `mission_interfaces` 패키지 상세
@@ -324,14 +318,16 @@ sequenceDiagram
         Ctrl->>CFS: /cfN/go_to (다음 waypoint)
         CFS-->>Perc: /cfN/pose
         Perc-->>Gcs: /states
-        Perc->>Perc: 마커 판별 (sim: ground-truth 거리 / real: ArUco+solvePnP)
+        Perc->>Perc: 마커 판별 (sim: ground-truth 거리 / real: ArUco+solvePnP/YOLO)
         Perc-->>Ctrl: /detections
         Perc-->>Gcs: /detections
+        opt 새 marker_id 최초 발견
+            Ctrl-->>Gcs: /mission/markers (latched, 즉시 갱신 발행)
+        end
     end
     Ctrl->>CFS: /cfN/go_to (홈 복귀)
     Ctrl->>CFS: /cfN/land
-    Ctrl-->>Gcs: /mission/markers (latched, 최종 마커 목록)
-    Note over Ctrl: 이후 (추후 구현) UGV 라우팅 노드가<br/>/mission/markers 구독해 최단경로 방문
+    Note over Ctrl: AWAITING_UGV_DONE (자리만, 미구현) -- 추후 UGV 라우팅<br/>노드가 /mission/markers 구독해 최단경로 방문 후<br/>완료 신호를 여기로 보내면 그때 DONE으로 전이하게 될 예정
 ```
 
 핵심 요약:

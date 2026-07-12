@@ -79,7 +79,7 @@ colcon build --symlink-install
 ros2 launch mission_bringup sim.launch.py
 ```
 
-정상 기동 시 콘솔에 대략 다음 순서로 로그가 뜬다: crazyflie_server(sim) 기동 → `control_node started, state=DECOMPOSE` → `mission state: DECOMPOSE -> PLAN -> PUBLISH_PLAN -> AWAITING_START` → (대시보드에서 Start 클릭 후) `TAKEOFF` → `COVERING` → 마커 검출 로그 → `RETURN_HOME` → `LAND` → `mission complete, N markers found`.
+정상 기동 시 콘솔에 대략 다음 순서로 로그가 뜬다: crazyflie_server(sim) 기동 → `control_node started, state=PREPARE` → `mission state: PREPARE -> AWAITING_START` → (대시보드에서 Start 클릭 후) `TAKEOFF` → `COVERING` → 마커 검출 로그(발견 즉시 `/mission/markers` 갱신) → `RETURN_HOME` → `LAND` → `AWAITING_UGV_DONE` → `aerial mission complete, N markers found` → `DONE`.
 
 ## 5. 실기체 실행 전 추가 체크리스트
 

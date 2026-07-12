@@ -42,6 +42,13 @@ source install/setup.bash
 
 `mission_interfaces`는 `rosidl_generate_interfaces`를 쓰므로 처음 빌드 시 다른 패키지보다 먼저 메시지가 생성된다. 빌드 에러가 `crazyflie_interfaces`/`crazyflie_py`를 못 찾는다면 crazyswarm2가 같은 워크스페이스에 없다는 뜻이니 `--packages-up-to`나 오버레이 구성을 확인한다.
 
+**`cf_perception`/`gcs_dashboard`(ament_python) 빌드가 `error: option --editable not recognized`로 죽는 경우**: 코드 문제가 아니라 `setuptools`가 최신 버전으로 올라가면서 `colcon build --symlink-install`이 쓰는 legacy `setup.py develop --editable` 경로와 안 맞아 생기는 잘 알려진 ROS2(Humble/Jammy) 호환 문제다. `torch`/`ultralytics`처럼 무거운 패키지를 pip로 새로 설치하면 `setuptools`가 딸려 올라오면서 재발하기 쉽다.
+
+```bash
+pip install setuptools==58.2.0 --user
+colcon build --symlink-install
+```
+
 ## 3. 실행 전 체크리스트 (공통)
 
 `ros2_ws/src/mission_bringup/config/mission_map.yaml` 확인:

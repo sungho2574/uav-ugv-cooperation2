@@ -397,6 +397,15 @@ class GcsScene {
         const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color }));
         const axes = new THREE.AxesHelper(0.3);
         axes.material.depthTest = false;
+        // AxesHelper draws its arrows in plain Three.js local space (+x,+y,+z),
+        // but w2t() negates world x when mapping into Three.js (see file
+        // header) -- so at yaw=0 the unflipped red (+x) arrow would point
+        // toward Three +x, i.e. world -x, backwards. Green (Y, altitude) and
+        // blue (Z -> world y) need no flip since neither of those axes is
+        // negated by w2t(). Scaling just the local x by -1 mirrors the red
+        // arrow consistently at every yaw (scale is applied before the
+        // mesh's own yaw rotation, so the flip survives rotation correctly).
+        axes.scale.x = -1;
         mesh.add(axes);
         const label = makeTextSprite(d.id, '#' + color.getHexString());
         label.position.set(0, 0.3, 0);
@@ -657,7 +666,7 @@ function main() {
           ? found.map((m) => `<div>#${m.id} (${m.x.toFixed(2)}, ${m.y.toFixed(2)})</div>`).join('')
           : '<div>(없음)</div>';
         markerStatusEl.innerHTML =
-          `<div class="marker-count">발견한 마커: ${countText}</div>` +
+          `<div class="marker-count">발견한 조난자: ${countText}</div>` +
           `<div class="marker-ids">${rows}</div>`;
       });
     }).catch((err) => {

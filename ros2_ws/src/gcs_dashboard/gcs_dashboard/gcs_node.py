@@ -49,11 +49,12 @@ class SharedState:
         self.progress = {}  # drone_id -> {waypoint_index, total_waypoints}
         self.mission_state = 'UNKNOWN'
         self.frames = {}    # drone_id -> jpeg bytes
-        # drone_id -> {radio_connected, wifi_connected}. Real hardware only
-        # (real_perception_node publishes this; sim_perception_node doesn't,
-        # so this just stays empty in sim -- see SharedState.snapshot, the
-        # frontend already treats "no entry" as unknown/no-signal same as
-        # the video frame itself does).
+        # drone_id -> {radio_connected, wifi_connected, battery_voltage}. Real
+        # hardware only (real_perception_node publishes this; sim_perception_node
+        # doesn't, so this just stays empty in sim -- see SharedState.snapshot,
+        # the frontend already treats "no entry" as unknown/no-signal same as
+        # the video frame itself does). battery_voltage is 0.0 until the first
+        # /{drone_id}/status message arrives.
         self.link_status = {}
 
     def update_drone(self, drone_id, x, y, z, yaw):
@@ -217,7 +218,11 @@ class GcsNode(Node):
 
     def _on_link_status(self, msg: LinkStatusArray):
         link_status = {
-            s.drone_id: {'radio_connected': s.radio_connected, 'wifi_connected': s.wifi_connected}
+            s.drone_id: {
+                'radio_connected': s.radio_connected,
+                'wifi_connected': s.wifi_connected,
+                'battery_voltage': s.battery_voltage,
+            }
             for s in msg.status
         }
         self.shared.set_link_status(link_status)

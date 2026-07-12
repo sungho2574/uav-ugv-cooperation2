@@ -453,11 +453,35 @@ class GcsScene {
   }
 }
 
-function buildLegend(zones) {
+// Rough 1S LiPo voltage->percent mapping (linear between typical full/empty
+// resting voltages) -- good enough for an at-a-glance indicator, not a
+// precise fuel gauge. See docs/RUNNING.md / crazyflies.yaml's
+// voltage_warning/voltage_critical for the thresholds crazyswarm2 itself uses.
+function voltageToPercent(voltage) {
+  const FULL_V = 4.2, EMPTY_V = 3.3;
+  const pct = ((voltage - EMPTY_V) / (FULL_V - EMPTY_V)) * 100;
+  return Math.max(0, Math.min(100, Math.round(pct)));
+}
+
+function buildLegend(zones, linkStatus) {
   const el = document.getElementById('legend');
-  el.innerHTML = zones.map((z) =>
-    `<div><span class="swatch" style="background:${z.color}"></span>${z.drone_id}</div>`).join('')
-    || '<div>zones not planned yet</div>';
+  linkStatus = linkStatus || {};
+  el.innerHTML = zones.map((z) => {
+    const status = linkStatus[z.drone_id];
+    // 0.0/no entry -> sim, or real hardware with no /status message yet
+    // (see SharedState.link_status) -- render "unknown" (empty gray track),
+    // not a misleading 0%.
+    const voltage = status ? status.battery_voltage : 0;
+    const known = voltage > 0;
+    const pct = known ? voltageToPercent(voltage) : 0;
+    const level = pct >= 50 ? 'ok' : pct >= 20 ? 'low' : 'critical';
+    return `<div class="row">
+      <span class="swatch" style="background:${z.color}"></span>
+      <span class="drone-id">${z.drone_id}</span>
+      <div class="battery-track"><div class="battery-fill${known ? ' ' + level : ''}" style="width:${pct}%"></div></div>
+      <span class="battery-label">${known ? pct + '%' : '--'}</span>
+    </div>`;
+  }).join('') || '<div>zones not planned yet</div>';
 }
 
 function pollVideo(droneId) {
@@ -620,7 +644,7 @@ function main() {
       });
 
       safeCall('setZones', () => gcsScene.setZones(state.zones || [], visitedByDrone));
-      safeCall('buildLegend', () => buildLegend(state.zones || []));
+      safeCall('buildLegend', () => buildLegend(state.zones || [], state.link_status || {}));
       safeCall('setPlannedPaths', () => gcsScene.setPlannedPaths(state.paths || {}));
       safeCall('setVisitedPaths', () => gcsScene.setVisitedPaths(state.paths || {}, state.progress || {}));
       safeCall('setMarkers', () => gcsScene.setMarkers(state.markers || []));

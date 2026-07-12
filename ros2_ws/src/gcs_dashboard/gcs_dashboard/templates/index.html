@@ -26,8 +26,21 @@
   #covering-elapsed { color: #cfd3d8; font-variant-numeric: tabular-nums; }
   #legend { position: absolute; bottom: 10px; left: 10px; background: rgba(20,22,26,0.75);
             padding: 8px 12px; border-radius: 6px; font-size: 12px; z-index: 2; }
+  #legend .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
   #legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
-                     margin-right: 6px; }
+                     flex: 0 0 auto; }
+  #legend .drone-id { flex: 0 0 auto; min-width: 24px; }
+  /* Battery bar: real hardware only (battery_voltage is 0.0/unknown in sim --
+     see SharedState.link_status), so an unknown reading renders as an empty
+     gray track with "--" instead of a false 0%. */
+  #legend .battery-track { width: 70px; height: 6px; background: #33363c;
+                            border-radius: 3px; overflow: hidden; flex: 0 0 auto; }
+  #legend .battery-fill { height: 100%; width: 0%; transition: width 0.3s ease, background 0.3s ease; }
+  #legend .battery-fill.ok { background: #4da6ff; }
+  #legend .battery-fill.low { background: #f5c542; }
+  #legend .battery-fill.critical { background: #ff6b6b; }
+  #legend .battery-label { min-width: 32px; text-align: right; color: #9aa0a6;
+                            font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   #marker-status { position: absolute; bottom: 10px; right: 10px; background: rgba(20,22,26,0.75);
                     padding: 8px 12px; border-radius: 6px; font-size: 12px; z-index: 2;
                     text-align: right; max-width: 260px; }
@@ -45,11 +58,12 @@
   .link-badge { color: #6a6f76; } /* unknown/no data yet (e.g. sim) */
   .link-badge.up { color: #6fd888; }
   .link-badge.down { color: #ff6b6b; }
-  /* AI-deck frames are 324x324 (square) -- size the tile off that aspect
-     ratio instead of flex-stretching it to fill the pane's leftover height,
-     which used to blow a single connected drone's tile up to the full
-     panel height with a mostly-empty black box. */
-  .video-tile .frame-wrap { aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+  /* AI-deck frames are 324x244 (not square -- confirmed from the actual
+     "first frame received (324x244)" log), so size the tile off that real
+     aspect ratio instead of flex-stretching it to fill the pane's leftover
+     height, which used to blow a single connected drone's tile up to the
+     full panel height with a mostly-empty black box. */
+  .video-tile .frame-wrap { aspect-ratio: 324 / 244; display: flex; align-items: center; justify-content: center;
                             background: #000; margin: 0 8px 8px 8px; border-radius: 4px; overflow: hidden; }
   .video-tile img { max-width: 100%; max-height: 100%; }
   .video-tile .no-signal { color: #555; font-size: 12px; }

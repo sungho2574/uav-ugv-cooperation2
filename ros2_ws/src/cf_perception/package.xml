@@ -11,6 +11,7 @@
 
   <depend>rclpy</depend>
   <depend>mission_interfaces</depend>
+  <depend>crazyflie_interfaces</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>cv_bridge</depend>

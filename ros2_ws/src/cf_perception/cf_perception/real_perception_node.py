@@ -45,6 +45,7 @@ import rclpy
 import yaml
 from rclpy.node import Node
 
+from crazyflie_interfaces.msg import Status
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from mission_interfaces.msg import DroneState, LinkStatus, LinkStatusArray, MarkerDetection
@@ -344,6 +345,7 @@ class DroneLink:
         self.bridge = bridge
         self.latest_pose = None  # (x, y, z, yaw, wall_clock_stamp_sec)
         self.wifi_connected = False  # set from the background _run thread
+        self.battery_voltage = 0.0  # volts; 0.0 = no /status reading yet
         self._last_pose_drop_warn = 0.0
         self.image_pub = node.create_publisher(Image, f'/{drone_id}/image_raw', 5)
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -351,6 +353,9 @@ class DroneLink:
 
     def update_pose(self, x, y, z, yaw, stamp_sec):
         self.latest_pose = (x, y, z, yaw, stamp_sec)
+
+    def update_battery(self, voltage):
+        self.battery_voltage = voltage
 
     def radio_connected(self, now):
         if self.latest_pose is None:
@@ -505,12 +510,20 @@ class RealPerceptionNode(Node):
 
         self.links = {}
         self.pose_subs = []
+        self.status_subs = []
         for drone_id, wifi_ip in zip(self.drone_ids, wifi_ips):
             self.links[drone_id] = DroneLink(
                 self, drone_id, wifi_ip, wifi_port, build_backend(), bridge)
             self.pose_subs.append(self.create_subscription(
                 PoseStamped, f'/{drone_id}/pose',
                 self._make_pose_callback(drone_id), 10))
+            # crazyswarm2's real backend already logs pm.vbatMV at ~1Hz (see
+            # crazyflies.yaml's `all.firmware_logging.default_topics.status`)
+            # and publishes it here as battery_voltage (volts) -- no firmware
+            # or config changes needed, just subscribe.
+            self.status_subs.append(self.create_subscription(
+                Status, f'/{drone_id}/status',
+                self._make_status_callback(drone_id), 10))
 
         # Radio connectivity is inferred from pose staleness (see
         # DroneLink.radio_connected), so it needs to be re-evaluated on a
@@ -560,6 +573,11 @@ class RealPerceptionNode(Node):
             self.states_pub.publish(state)
         return callback
 
+    def _make_status_callback(self, drone_id):
+        def callback(msg: Status):
+            self.links[drone_id].update_battery(msg.battery_voltage)
+        return callback
+
     def _publish_link_status(self):
         now = time.time()
         array = LinkStatusArray()
@@ -568,6 +586,7 @@ class RealPerceptionNode(Node):
                 drone_id=drone_id,
                 radio_connected=link.radio_connected(now),
                 wifi_connected=link.wifi_connected,
+                battery_voltage=link.battery_voltage,
             ))
         self.link_status_pub.publish(array)
 

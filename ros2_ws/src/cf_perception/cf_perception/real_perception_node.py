@@ -24,10 +24,10 @@ in as this node's `detection_backend` parameter):
     ground-contact pixel and intersecting it with the (known-altitude) ground
     plane -- see pixel_ray_to_world. Since there's no true per-object ID,
     repeated sightings of the same physical object are deduplicated by
-    rounding its *computed world position* into a grid bucket (see
-    _synthetic_marker_id) rather than by a real tracked identity -- two
-    same-class objects closer together than `yolo.cluster_radius` will be
-    merged into one record. See docs/map_configuration.md for tuning this.
+    snapping the *computed world position* onto a fixed `cluster_radius`-sized
+    grid (shared across all drones) -- once a cell has produced one report,
+    every later detection landing in that same cell is dropped, rather than
+    tracked as a real identity. See docs/map_configuration.md for tuning this.
 
 The WiFi frame protocol (rx_bytes/receive_frame/try_connect, magic byte 0xBC)
 and the camera->body rotation assumption are carried over verbatim from the
@@ -278,16 +278,19 @@ class YoloBackend:
 
     Unlike ArUco (a persistent per-marker ID straight from the tag), YOLO
     re-detects the same physical target on practically every frame it's
-    visible in, and position noise (ray-ground jitter, drone pose noise)
-    means those repeat sightings don't always land in the exact same
-    _synthetic_marker_id bucket -- so relying solely on that hash to dedupe
-    let the same object get reported as "found" several times over. Instead,
-    this backend remembers which grid cells (see _synthetic_marker_id's
-    bucketing) have already produced a detection in self._found_cells, and
-    once a cell is marked found, every later detection landing in that same
-    cell is dropped -- first-seen-per-cell wins, same "found once, stays
-    found" semantics as control_node's marker dedup, but enforced at the
-    source instead of relying on GCS-side setdefault."""
+    visible in, with no real per-object identity of its own. This backend
+    dedupes by snapping each detection's computed world position onto a
+    fixed `cluster_radius`-sized grid (floor(x/cluster_radius), not round --
+    round() has two boundaries per cell edge to worry about, floor() has
+    exactly one, and cell membership stops depending on which side of the
+    cell's *center* a point falls on) and remembering which cells have
+    already produced a report in self._found_cells: once a cell is marked
+    found, every later detection landing in that same cell is dropped.
+    self._found_cells is passed in from RealPerceptionNode and shared across
+    every drone's YoloBackend instance (not one per drone), so once any
+    drone reports a cell as found, every other drone's later detections in
+    that same cell are skipped too. Each DroneLink runs its own thread and
+    they can all call process() concurrently, hence the shared lock."""
 
     def __init__(self, weights_path, camera_matrix, confidence_threshold,
                  nms_threshold, target_height, cluster_radius,
@@ -296,13 +299,7 @@ class YoloBackend:
         self.camera_matrix = camera_matrix
         self.target_height = target_height
         self.cluster_radius = cluster_radius
-        # {(bucket_x, bucket_y), ...} already reported -- passed in from
-        # RealPerceptionNode and shared across every drone's YoloBackend
-        # instance (not one set per drone), so once any drone reports a cell
-        # as found, every other drone's later detections in that same cell
-        # are skipped too. Each DroneLink runs its own thread and they can
-        # all call process() concurrently, hence the shared lock.
-        self._found_cells = found_cells
+        self._found_cells = found_cells  # {(cell_x, cell_y), ...} already reported
         self._found_cells_lock = found_cells_lock
 
     def process(self, frame_bgr, drone_pose):
@@ -318,7 +315,7 @@ class YoloBackend:
                 if hit is None:
                     continue
                 wx, wy, wz = hit
-                cell = (round(wx / self.cluster_radius), round(wy / self.cluster_radius))
+                cell = (math.floor(wx / self.cluster_radius), math.floor(wy / self.cluster_radius))
                 with self._found_cells_lock:
                     if cell in self._found_cells:
                         continue  # already reported once (by any drone) -- skip

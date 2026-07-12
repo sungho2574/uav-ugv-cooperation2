@@ -16,8 +16,12 @@
 services:
   cf_perception:
     build:
-      context: ../..           # ros2_ws/src/ -- see Dockerfile's header
-      dockerfile: cf_perception/docker/Dockerfile
+      # The OUTER ros2_ws/src/ (five levels up from this file) -- the one
+      # this whole repo is checked out into alongside crazyswarm2, NOT this
+      # repo's own nested ros2_ws/src/. See Dockerfile's header for the
+      # expected layout; crazyflie_interfaces can't be reached otherwise.
+      context: ../../../../..
+      dockerfile: uav-ugv-cooperation2/ros2_ws/src/cf_perception/docker/Dockerfile
     image: cf_perception:jetson
 
     # network_mode: host -- the container's ROS2 DDS participant needs to see

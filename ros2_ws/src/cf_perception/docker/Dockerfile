@@ -13,12 +13,20 @@
 # (network_mode: host, see docker-compose.yml / real.launch.py's
 # perception_runtime: "docker" path).
 #
-# Build context MUST be ros2_ws/src/ (two directories up from this file), so
-# it can COPY mission_interfaces/, crazyflie_interfaces/, and cf_perception/.
-# crazyflie_interfaces isn't part of this repo -- it comes from crazyswarm2,
-# which docs/RUNNING.md already requires to be checked out into this same
-# ros2_ws/src/ for native (non-Jetson) builds too, so it's expected to be
-# right there next to cf_perception when this image is built.
+# Build context MUST be the OUTER ros2_ws/src/ that this whole repo is
+# checked out into alongside crazyswarm2 -- i.e. the layout docs/RUNNING.md
+# already requires for native builds too:
+#
+#   ros2_ws/src/
+#     crazyswarm2/               <- provides crazyflie_interfaces/
+#     uav-ugv-cooperation2/      <- this repo (has its OWN nested ros2_ws/src/)
+#       ros2_ws/src/cf_perception/mission_interfaces/...
+#
+# crazyflie_interfaces isn't part of this repo, so it can only be reached by
+# pointing the build context at that outer src/ (see docker-compose.yml's
+# `context: ../../../../..`, five levels up from this file, and
+# `dockerfile:` pointing back in) -- COPY can't reach outside its context no
+# matter where inside this repo the Dockerfile itself lives.
 #
 #   cd ros2_ws/src/cf_perception/docker
 #   docker compose build
@@ -59,11 +67,12 @@ RUN python3 -c "import cv2, numpy, torch, ultralytics; print('cv2', cv2.__versio
 RUN pip3 install --no-cache-dir PyYAML
 
 # ---- Build message + perception packages ----
-# Build context is ros2_ws/src/, so these are all available at COPY time.
+# Build context is the OUTER ros2_ws/src/ (see header) -- crazyswarm2/ and
+# uav-ugv-cooperation2/ are both direct children of it.
 WORKDIR /ros_ws/src
-COPY mission_interfaces/ mission_interfaces/
-COPY crazyflie_interfaces/ crazyflie_interfaces/
-COPY cf_perception/ cf_perception/
+COPY uav-ugv-cooperation2/ros2_ws/src/mission_interfaces/ mission_interfaces/
+COPY crazyswarm2/crazyflie_interfaces/ crazyflie_interfaces/
+COPY uav-ugv-cooperation2/ros2_ws/src/cf_perception/ cf_perception/
 
 WORKDIR /ros_ws
 RUN bash -c "source /opt/ros/humble/setup.bash && \

@@ -98,7 +98,12 @@ ros2 launch mission_bringup sim.launch.py
 
 젯슨은 JetPack 버전에 맞는 torch/ultralytics 빌드를 네이티브로 설치하기 까다로워서, `real_perception_node`만 따로 컨테이너(`cf_perception:jetson`, base: `ultralytics/ultralytics:latest-jetson-jetpack6`)에서 돌릴 수 있게 해뒀다. `control_node`/`gcs_dashboard`/crazyswarm2는 그대로 젯슨 호스트에서 네이티브로 돌고, 컨테이너는 `network_mode: host`로 붙어서 같은 ROS2 DDS로 통신한다 (`cf_perception/docker/fastdds_udp.xml`로 SHM 대신 UDP 강제).
 
-1. `crazyswarm2`(`crazyflie_interfaces` 포함)가 이미 `ros2_ws/src/`에 소스로 존재해야 한다 (1절 사전 준비물과 동일 요구사항 — 도커 빌드 컨텍스트가 `ros2_ws/src/`라 거기서 같이 COPY됨).
+1. 아래처럼 이 저장소(`uav-ugv-cooperation2`)와 `crazyswarm2`가 **같은 이름으로, 같은 상위 `ros2_ws/src/` 밑에** 나란히 존재해야 한다 (1절 사전 준비물과 동일 요구사항). 도커 빌드 컨텍스트가 이 바깥쪽 `ros2_ws/src/`라서 `crazyflie_interfaces`를 거기서 같이 COPY함 — 폴더 이름이 다르면 `docker compose build`가 `crazyflie_interfaces`를 못 찾고 실패한다.
+   ```
+   ros2_ws/src/
+     crazyswarm2/               <- crazyflie_interfaces 제공
+     uav-ugv-cooperation2/      <- 이 저장소 (자체 ros2_ws/src/를 안에 갖고 있음)
+   ```
 2. 이미지를 한 번 빌드해둔다 (미션 launch 시점에 자동 빌드 안 됨 — 매번 하기엔 너무 느림):
    ```bash
    cd ros2_ws/src/cf_perception/docker

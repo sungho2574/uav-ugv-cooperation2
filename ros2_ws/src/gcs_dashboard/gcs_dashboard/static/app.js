@@ -479,7 +479,7 @@ function buildLegend(zones, linkStatus) {
       <span class="swatch" style="background:${z.color}"></span>
       <span class="drone-id">${z.drone_id}</span>
       <div class="battery-track"><div class="battery-fill${known ? ' ' + level : ''}" style="width:${pct}%"></div></div>
-      <span class="battery-label">${known ? pct + '%' : '--'}</span>
+      <span class="battery-label">${known ? `${pct}% (${voltage.toFixed(2)}V)` : '--'}</span>
     </div>`;
   }).join('') || '<div>zones not planned yet</div>';
 }

@@ -9,15 +9,15 @@
 #      automatically, a fresh build is far too slow to happen inline on
 #      every mission launch):
 #        cd ros2_ws/src/cf_perception/docker
-#        docker compose -f docker-compose.jetson.yml build
+#        docker compose build
 #   2. Manually running/debugging the container against a hand-written
 #      params.yaml, outside of a full mission launch:
-#        PARAMS_FILE=/path/to/params.yaml docker compose -f docker-compose.jetson.yml up
+#        PARAMS_FILE=/path/to/params.yaml docker compose up
 services:
   cf_perception:
     build:
-      context: ../..           # ros2_ws/src/ -- see Dockerfile.jetson's header
-      dockerfile: cf_perception/docker/Dockerfile.jetson
+      context: ../..           # ros2_ws/src/ -- see Dockerfile's header
+      dockerfile: cf_perception/docker/Dockerfile
     image: cf_perception:jetson
 
     # network_mode: host -- the container's ROS2 DDS participant needs to see

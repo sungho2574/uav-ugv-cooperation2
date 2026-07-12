@@ -102,7 +102,7 @@ ros2 launch mission_bringup sim.launch.py
 2. 이미지를 한 번 빌드해둔다 (미션 launch 시점에 자동 빌드 안 됨 — 매번 하기엔 너무 느림):
    ```bash
    cd ros2_ws/src/cf_perception/docker
-   docker compose -f docker-compose.jetson.yml build
+   docker compose build
    ```
 3. `mission_map.yaml`의 `perception_runtime: "docker"`로 설정 (기본은 `"native"`).
 4. 평소처럼 `ros2 launch mission_bringup real.launch.py` 실행 — `real_perception_node`만 자동으로 `docker run`으로 뜨고, 나머지는 네이티브로 뜬다 (`real.launch.py`의 `_build_docker_perception_process` 참고). 실행 시점에 그때그때 `drone_ids`/`wifi_ips`/`detection_backend`/`yolo.*` 값을 담은 params yaml을 생성해서 컨테이너에 마운트하므로, `mission_map.yaml`을 고치면 다음 launch부터 바로 반영된다.
@@ -157,7 +157,7 @@ ros2 service call /mission/start std_srvs/srv/Trigger
 | 실기체 영상은 뜨는데 마커 world 좌표가 명백히 틀림 | `camera_intrinsics.yaml` 캘리브레이션 여부, `R_CAM_TO_BODY` 장착각 가정, `/cfN/pose`와 프레임 캡처 시각 차이(0.2초 동기화 허용오차) 확인 |
 | `detection_backend: yolo`로 실행했는데 `RuntimeError: yolo_weights_path is empty` 등으로 죽음 | `mission_map.yaml`의 `yolo.weights_path`가 비어있거나 잘못된 경로 — 실제 존재하는 `.onnx` 파일의 절대경로로 설정 |
 | YOLO 백엔드에서 물체가 하나도 안 잡히거나 좌표가 이상함 | [map_configuration.md](map_configuration.md) 8절(특히 8.4 onnx export 형식 가정) 참고 |
-| `perception_runtime: docker`인데 launch가 `image ... was not found`로 죽음 | 5-1절대로 `docker compose -f ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`를 먼저 실행했는지 확인 (자동 빌드 안 함) |
+| `perception_runtime: docker`인데 launch가 `image ... was not found`로 죽음 | 5-1절대로 `cd ros2_ws/src/cf_perception/docker && docker compose build`를 먼저 실행했는지 확인 (자동 빌드 안 함) |
 | `perception_runtime: docker`인데 `no \`docker\` binary was found on PATH`로 죽음 | 젯슨에 Docker Engine + NVIDIA Container Toolkit 설치 여부 확인 |
 | 도커 컨테이너의 `real_perception_node`가 떠도 `control_node`/`gcs_dashboard`에서 `/states`, `/detections`, `/mission/link_status`가 안 보임 | 컨테이너가 호스트와 같은 `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`을 쓰는지(launch가 호스트 환경변수를 그대로 전달함) 확인, `docker run` 로그에 FastDDS 관련 에러가 있는지 확인 (`fastdds_udp.xml`이 `/fastdds_udp.xml`로 잘 마운트됐는지) |
 | 드론 위치가 시간이 지날수록 dashboard에서 서서히 어긋남 | 모션캡처 없이 온보드 추정치만 쓰는 구조의 알려진 한계(드리프트) — 임무 범위/시간을 줄이거나 외부 포지셔닝 시스템 도입 검토 |

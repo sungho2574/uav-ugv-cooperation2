@@ -10,7 +10,7 @@
 # real_perception_node is the only node in this project that needs YOLO/
 # torch -- control_node, gcs_dashboard, and crazyswarm2 itself stay native on
 # the Jetson host and talk to this container purely over ROS2 DDS
-# (network_mode: host, see docker-compose.jetson.yml / real.launch.py's
+# (network_mode: host, see docker-compose.yml / real.launch.py's
 # perception_runtime: "docker" path).
 #
 # Build context MUST be ros2_ws/src/ (two directories up from this file), so
@@ -21,7 +21,7 @@
 # right there next to cf_perception when this image is built.
 #
 #   cd ros2_ws/src/cf_perception/docker
-#   docker compose -f docker-compose.jetson.yml build
+#   docker compose build
 # ============================================================
 FROM ultralytics/ultralytics:latest-jetson-jetpack6
 

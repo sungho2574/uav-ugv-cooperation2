@@ -30,7 +30,7 @@ detection_backend: "yolo"
 #     JetPack-matched torch/ultralytics build is fragile to install natively
 #     but the ultralytics/ultralytics jetson-jetpack6 base image already has
 #     it working. Build the image once ahead of time with
-#     `docker compose -f ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`
+#     `cd ros2_ws/src/cf_perception/docker && docker compose build`
 #     before launching with this set to "docker" -- real.launch.py does NOT
 #     build it automatically (way too slow to happen inline on every launch).
 perception_runtime: "native"

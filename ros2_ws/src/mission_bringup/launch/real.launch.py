@@ -128,9 +128,9 @@ def _build_docker_perception_process(mission_map, perception_share, perception_p
     as a native ROS2 node, for hosts (the Jetson) where a JetPack-matched
     torch/ultralytics build is fragile to install directly. See
     mission_map.yaml's perception_runtime comment for the native/docker
-    tradeoff and cf_perception/docker/Dockerfile.jetson for image details.
+    tradeoff and cf_perception/docker/Dockerfile for image details.
 
-    Unlike docker-compose.jetson.yml (a manual-testing convenience only),
+    Unlike docker-compose.yml (a manual-testing convenience only),
     this builds a plain `docker run` invocation directly so it can bind-mount
     a fresh, mission-specific params.yaml (generated here from the exact same
     perception_params dict the native path would hand to Node()) on every
@@ -141,7 +141,7 @@ def _build_docker_perception_process(mission_map, perception_share, perception_p
 
     Does NOT build the image itself -- a fresh build is far too slow to
     happen inline on every mission launch. Build it once ahead of time with
-    `docker compose -f cf_perception/docker/docker-compose.jetson.yml build`
+    `cd cf_perception/docker && docker compose build`
     and this raises a clear error if that was never done.
     """
     docker_bin = shutil.which('docker')
@@ -156,8 +156,7 @@ def _build_docker_perception_process(mission_map, perception_share, perception_p
     if inspect.returncode != 0:
         raise RuntimeError(
             f"perception_runtime is 'docker' but image '{docker_image}' was not found -- "
-            'build it first with `docker compose -f '
-            'ros2_ws/src/cf_perception/docker/docker-compose.jetson.yml build`')
+            'build it first with `cd ros2_ws/src/cf_perception/docker && docker compose build`')
 
     fastdds_xml_path = os.path.join(perception_share, 'docker', 'fastdds_udp.xml')
 

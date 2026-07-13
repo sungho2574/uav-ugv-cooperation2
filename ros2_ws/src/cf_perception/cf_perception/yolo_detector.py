@@ -37,7 +37,7 @@ class YoloDetector:
         obliquely-mounted camera, since the bottom edge is where the object
         actually touches the floor in the image."""
         results = self.model.predict(
-            frame_bgr, conf=self.confidence_threshold, iou=self.nms_threshold, verbose=False)
+            frame_bgr, imgsz=416, device=0, conf=self.confidence_threshold, iou=self.nms_threshold, verbose=False)
         r = results[0]
 
         detections = []

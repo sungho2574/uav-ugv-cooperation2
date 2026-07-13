@@ -31,7 +31,7 @@
 #   cd ros2_ws/src/cf_perception/docker
 #   docker compose build
 # ============================================================
-FROM ultralytics/ultralytics:8.3.51-jetson-jetpack6
+FROM ultralytics/ultralytics:latest-jetson-jetpack6
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Seoul
 
@@ -77,9 +77,6 @@ COPY crazyswarm2/crazyflie_interfaces/ crazyflie_interfaces/
 COPY uav-ugv-cooperation2/ros2_ws/src/cf_perception/ cf_perception/
 
 WORKDIR /ros_ws
-
-# ROS 2 Humble/ament compatibility
-RUN pip3 install --no-cache-dir "setuptools==58.2.0"
 RUN bash -c "source /opt/ros/humble/setup.bash && \
     colcon build --packages-select mission_interfaces crazyflie_interfaces cf_perception \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"

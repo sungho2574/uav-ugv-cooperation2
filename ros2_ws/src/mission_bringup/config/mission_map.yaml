@@ -33,7 +33,7 @@ detection_backend: "yolo"
 #     `cd ros2_ws/src/cf_perception/docker && docker compose build`
 #     before launching with this set to "docker" -- real.launch.py does NOT
 #     build it automatically (way too slow to happen inline on every launch).
-perception_runtime: "native"
+perception_runtime: "docker"
 # Only read when perception_runtime is "docker" -- the image tag built above.
 docker_image: "cf_perception:jetson"
 

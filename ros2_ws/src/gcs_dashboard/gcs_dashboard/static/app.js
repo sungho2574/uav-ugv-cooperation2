@@ -300,41 +300,69 @@ class GcsScene {
     });
   }
 
-  // `progress` is the authoritative per-drone {waypoint_index, total_waypoints}
+  // `progress` is the authoritative per-drone {visited_indices, total_waypoints}
   // published by control_node itself (the thing actually driving the FSM), not
-  // a client-side guess. An earlier version guessed "how far along" a drone
-  // was by finding whichever waypoint was spatially nearest to its current
-  // position -- unreliable on a zig-zag lawnmower path, where many waypoints
-  // on *different* rows can sit close to the current position without being
-  // anywhere near "next", which is why cf2/cf3 showed as almost fully
-  // "visited" right from the start of the mission.
-  // This one genuinely needs a rebuild every poll (the tube grows as
-  // waypoint_index advances), but it's only ~3 small tube meshes -- cheap,
-  // and now properly disposed via clearGroup instead of leaking.
+  // a client-side guess. An earlier version guessed "how far along" a drone was
+  // by finding whichever waypoint was spatially nearest to its current position
+  // -- unreliable on a zig-zag lawnmower path, where many waypoints on
+  // *different* rows can sit close to the current position without being
+  // anywhere near "next", which is why cf2/cf3 showed as almost fully "visited"
+  // right from the start of the mission.
+  // This one genuinely needs a rebuild every poll (the tube grows as more
+  // indices are visited), but it's only a few small tube meshes -- cheap, and
+  // now properly disposed via clearGroup instead of leaking.
   setVisitedPaths(paths, progress) {
     clearGroup(this.visitedPathGroup);
     Object.entries(paths).forEach(([droneId, wps]) => {
       if (!wps || wps.length < 2) return;
-      const visitedUpTo = (progress[droneId] && progress[droneId].waypoint_index) || 0;
-      const visitedPts = wps.slice(0, Math.min(wps.length, visitedUpTo + 1))
-        .map(([x, y]) => w2t(x, y, 0.02));
-      // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
-      // zero-length segment (NaN tangents) which would make the tube vanish.
-      const dedup = [];
-      visitedPts.forEach((p) => {
-        if (!dedup.length || p.distanceTo(dedup[dedup.length - 1]) > 1e-6) dedup.push(p);
-      });
-      if (dedup.length >= 2) {
+      // Draw the *actually-flown legs* from the exact visited-index set, NOT a
+      // wps.slice(0, waypoint_index) prefix. The drone flies waypoints in index
+      // order, so a plain prefix looks right for a clean boustrophedon -- but a
+      // SCoPP NN/TSP path revisits cells (goes out, then retraces to reach cells
+      // it skipped), and there `waypoint_index` (= max marked index) jumps ahead
+      // the moment the drone passes a cell that also appears at a later index,
+      // painting unflown retrace legs as visited. Grouping the visited indices
+      // into contiguous runs and tubing each run instead renders the real
+      // traveled path (retraces and all) and never jumps past where the drone
+      // has actually reached.
+      const visited = ((progress[droneId] && progress[droneId].visited_indices) || [])
+        .filter((i) => i >= 0 && i < wps.length)
+        .sort((a, b) => a - b);
+      if (visited.length < 2) return;
+
+      // Split into runs of consecutive indices (i, i+1, i+2, ...) -- each run is
+      // a stretch the drone flew contiguously; a gap means a cell it never came
+      // within arrival_radius of (an honest hole, not bridged by a fake segment).
+      const runs = [];
+      let run = [visited[0]];
+      for (let k = 1; k < visited.length; k++) {
+        if (visited[k] === visited[k - 1] + 1) run.push(visited[k]);
+        else { runs.push(run); run = [visited[k]]; }
+      }
+      runs.push(run);
+
+      runs.forEach((r) => {
+        if (r.length < 2) return;
+        const pts = r.map((i) => w2t(wps[i][0], wps[i][1], 0.02));
+        // Dedup consecutive coincident points -- CatmullRomCurve3 chokes on a
+        // zero-length segment (NaN tangents) which would make the tube vanish.
+        const dedup = [];
+        pts.forEach((p) => {
+          if (!dedup.length || p.distanceTo(dedup[dedup.length - 1]) > 1e-6) dedup.push(p);
+        });
+        if (dedup.length < 2) return;
         // LineBasicMaterial's `linewidth` is ignored on most GPUs/browsers (a
         // long-standing WebGL/ANGLE limitation) so a "thicker visited path"
         // has to actually be geometry, not a fatter line -- a thin white tube
-        // mesh along the traveled points.
-        const curve = new THREE.CatmullRomCurve3(dedup, false, 'catmullrom', 0);
+        // mesh along the traveled points. `centripetal` Catmull-Rom (not the
+        // uniform 0 tension used before) avoids the loops/overshoot a uniform
+        // spline throws at the tight U-turns a retracing path is full of.
+        const curve = new THREE.CatmullRomCurve3(dedup, false, 'centripetal');
         const tubeGeom = new THREE.TubeGeometry(
           curve, Math.max(1, dedup.length * 4), 0.035, 6, false);
         this.visitedPathGroup.add(
           new THREE.Mesh(tubeGeom, new THREE.MeshBasicMaterial({ color: 0xffffff })));
-      }
+      });
     });
   }
 

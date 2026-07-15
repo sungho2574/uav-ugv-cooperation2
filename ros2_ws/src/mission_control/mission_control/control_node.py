@@ -1,34 +1,18 @@
 #!/usr/bin/env python3
-"""Central mission state machine.
+"""Mission state machine using onboard Crazyflie trajectories.
 
-Single rclpy.Node that owns the whole mission from a cold start to landing:
-loads the known mission map, splits it into 3 zones (one per drone), plans a
-boustrophedon coverage path per zone, drives the 3 Crazyflies through
-crazyswarm2, collects detections published by whichever cf_perception node is
-running (sim or real, same topic contract), and republishes each newly-found
-marker to /mission/markers (latched) as soon as it's detected -- not just
-once at mission end -- so the (future) UGV routing node can start routing to
-markers mid-mission instead of waiting for the whole aerial sweep to finish.
-The FSM has a placeholder AWAITING_UGV_DONE state before DONE for that same
-future UGV node to signal it's finished visiting everything; not implemented
-yet (falls straight through to DONE), just documenting where it goes.
+The coverage path is planned on the Jetson, converted once into degree-7
+polynomial pieces, uploaded to each Crazyflie, and executed by the onboard
+high-level commander. No low-level /cmd_full_state stream is used during
+coverage, so YOLO/GCS/CPU load cannot starve the flight setpoint stream.
 
-Coverage (the ㄹ-shape sweep) is flown as a single continuously-advancing
-*streamed* position reference (crazyflie_interfaces/FullState on
-/cfN/cmd_full_state) rather than a sequence of discrete go_to calls -- go_to
-plans a smooth stop-to-stop trajectory for each leg (zero velocity at both
-ends), so chaining many of them one per grid cell means literally
-decelerating to a stop at every single cell before accelerating into the
-next leg. Streaming a position that keeps sliding along the whole path at
-cruise_speed (arc-length parameterized, see _interpolate_path) removes that
-stop-and-go behavior entirely: takeoff/land/return-home still use the
-high-level services (fire-and-forget, no action servers exist in
-crazyswarm2), but coverage is a moving target the onboard/sim controller
-tracks continuously.
-
-Runs as a single non-blocking timer-driven FSM so that the /detections
-subscriber keeps getting serviced while the drones are moving -- no blocking
-sleeps anywhere in this node.
+The node keeps the existing ROS mission topics and GCS services. It also:
+- compresses collinear grid-cell waypoints before trajectory generation;
+- uses a seventh-order smoothstep with zero velocity/acceleration/jerk at
+  segment endpoints;
+- monitors measured flight state and commands a safety land when a drone
+  repeatedly leaves the configured flight envelope;
+- performs a final same-drone spatial duplicate guard on marker reports.
 """
 import math
 import time
@@ -39,13 +23,19 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
 from builtin_interfaces.msg import Duration as DurationMsg
-from crazyflie_interfaces.msg import FullState
-from crazyflie_interfaces.srv import GoTo, Land, NotifySetpointsStop, Takeoff
+from crazyflie_interfaces.msg import TrajectoryPolynomialPiece
+from crazyflie_interfaces.srv import (
+    GoTo,
+    Land,
+    StartTrajectory,
+    Takeoff,
+    UploadTrajectory,
+)
 from geometry_msgs.msg import Point, Point32
 from geometry_msgs.msg import Polygon as PolygonMsg
 from geometry_msgs.msg import PoseStamped
 from mission_interfaces.msg import (
-    CoveragePath, CoveragePathArray, DroneProgress, DroneProgressArray, DroneState,
+    CoveragePath, CoveragePathArray, DroneProgress, DroneProgressArray,
     MarkerDetection, MarkerRecord, MarkerRecordArray, ZoneAssignment, ZoneAssignmentArray,
 )
 from nav_msgs.msg import Path
@@ -76,109 +66,110 @@ def dist2d(a, b):
 
 
 class DroneHandle:
-    """Per-drone crazyswarm2 clients + coverage-following state."""
+    """Per-drone high-level commander clients and trajectory state."""
+
+    TRAJECTORY_ID = 1
 
     def __init__(self, node, drone_id, home_position):
         self.node = node
-        self.drone_id = drone_id
-        self.home_position = home_position  # [x, y, z]
-        prefix = '/' + drone_id
-        self.takeoff_client = node.create_client(Takeoff, prefix + '/takeoff')
-        self.land_client = node.create_client(Land, prefix + '/land')
-        self.go_to_client = node.create_client(GoTo, prefix + '/go_to')
-        self.notify_setpoints_stop_client = node.create_client(
-            NotifySetpointsStop, prefix + '/notify_setpoints_stop')
-        # Emergency motor cut-off (crazyswarm2 `emergency` service, std_srvs/Empty)
-        # -- used by the mission kill switch. On real hardware this immediately
-        # stops the motors (firmware send_emergency_stop); the sim backend stubs
-        # it, so the button is still safe to test in sim.
-        self.emergency_client = node.create_client(Empty, prefix + '/emergency')
-        # Streaming position reference used during COVERING -- see module
-        # docstring for why this replaces per-cell go_to calls.
-        self.cmd_full_state_pub = node.create_publisher(FullState, prefix + '/cmd_full_state', 1)
+        self.drone_id = str(drone_id)
+        self.home_position = tuple(home_position)
+        prefix = '/' + self.drone_id
 
-        self.waypoints = []  # list of (x, y), z comes from cruise altitude separately
-        self.cum_dist = [0.0]  # cum_dist[i] = arc length from waypoints[0] to waypoints[i]
+        self.takeoff_client = node.create_client(
+            Takeoff, prefix + '/takeoff')
+        self.land_client = node.create_client(
+            Land, prefix + '/land')
+        self.go_to_client = node.create_client(
+            GoTo, prefix + '/go_to')
+        self.upload_trajectory_client = node.create_client(
+            UploadTrajectory, prefix + '/upload_trajectory')
+        self.start_trajectory_client = node.create_client(
+            StartTrajectory, prefix + '/start_trajectory')
+        self.emergency_client = node.create_client(
+            Empty, prefix + '/emergency')
+
+        # Original cell-center path used for GCS progress.
+        self.waypoints = []
+
+        # Collinearity-compressed path used for onboard trajectory execution.
+        self.flight_waypoints = []
+        self.trajectory_pieces = []
+        self.trajectory_duration = 0.0
+        self.upload_future = None
+        self.start_future = None
         self.covering_start_time = None
-        # visited_mask: set of waypoint indices whose cell the drone's *live
-        # measured* position has actually come within arrival_radius of --
-        # checked independently against every remaining waypoint each tick
-        # (see ControlNode._update_visited_cells), not just the next one in
-        # path order. That independence matters: if the drone cuts a corner
-        # and never gets close enough to one cell, later cells still get
-        # marked visited normally instead of being permanently blocked.
+
         self.visited_mask = set()
-        # arrived_index: highwater mark (max visited index so far) -- used
-        # for the "swept so far" tube/progress-bar display, where a
-        # monotonic contiguous number is what's wanted even if visited_mask
-        # itself has a gap.
         self.arrived_index = 0
         self.done = False
-        self.last_target_xy = (home_position[0], home_position[1])
+        self.last_target_xy = (
+            float(home_position[0]),
+            float(home_position[1]),
+        )
 
     def wait_for_services(self, node, timeout_sec):
         for client, name in (
             (self.takeoff_client, 'takeoff'),
             (self.land_client, 'land'),
             (self.go_to_client, 'go_to'),
-            (self.notify_setpoints_stop_client, 'notify_setpoints_stop'),
+            (self.upload_trajectory_client, 'upload_trajectory'),
+            (self.start_trajectory_client, 'start_trajectory'),
         ):
             if not client.wait_for_service(timeout_sec=timeout_sec):
-                node.get_logger().warn(
-                    f'{self.drone_id}/{name} service not available after {timeout_sec}s '
-                    '(is the crazyflie_server launched?)')
+                raise RuntimeError(
+                    f'{self.drone_id}/{name} service not available after '
+                    f'{timeout_sec}s (is crazyflie_server running?)')
 
     def send_takeoff(self, height, duration):
-        req = Takeoff.Request()
-        req.group_mask = 0
-        req.height = float(height)
-        req.duration = seconds_to_duration_msg(duration)
-        self.takeoff_client.call_async(req)
+        request = Takeoff.Request()
+        request.group_mask = 0
+        request.height = float(height)
+        request.duration = seconds_to_duration_msg(duration)
+        return self.takeoff_client.call_async(request)
 
     def send_land(self, height, duration):
-        req = Land.Request()
-        req.group_mask = 0
-        req.height = float(height)
-        req.duration = seconds_to_duration_msg(duration)
-        self.land_client.call_async(req)
+        request = Land.Request()
+        request.group_mask = 0
+        request.height = float(height)
+        request.duration = seconds_to_duration_msg(duration)
+        return self.land_client.call_async(request)
 
-    def send_go_to(self, xyz, yaw_deg, duration):
-        req = GoTo.Request()
-        req.group_mask = 0
-        req.relative = False
-        req.goal = Point(x=float(xyz[0]), y=float(xyz[1]), z=float(xyz[2]))
-        req.yaw = float(yaw_deg)
-        req.duration = seconds_to_duration_msg(duration)
-        self.go_to_client.call_async(req)
-        self.last_target_xy = (xyz[0], xyz[1])
+    def send_go_to(self, xyz, yaw_rad, duration):
+        request = GoTo.Request()
+        request.group_mask = 0
+        request.relative = False
+        request.goal = Point(
+            x=float(xyz[0]),
+            y=float(xyz[1]),
+            z=float(xyz[2]),
+        )
+        request.yaw = float(yaw_rad)
+        request.duration = seconds_to_duration_msg(duration)
+        self.last_target_xy = (float(xyz[0]), float(xyz[1]))
+        return self.go_to_client.call_async(request)
 
-    def send_cmd_full_state(self, xy, z):
-        """Stream an absolute position reference (velocity/acceleration left at
-        zero -- position error alone is enough for the onboard/sim controller
-        to track a slowly, continuously moving target; see module docstring).
-        """
-        msg = FullState()
-        msg.header.stamp = self.node.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.pose.position.x = float(xy[0])
-        msg.pose.position.y = float(xy[1])
-        msg.pose.position.z = float(z)
-        msg.pose.orientation.w = 1.0  # identity quaternion -- no yaw control
-        self.cmd_full_state_pub.publish(msg)
-        self.last_target_xy = (xy[0], xy[1])
+    def upload_trajectory(self):
+        request = UploadTrajectory.Request()
+        request.trajectory_id = self.TRAJECTORY_ID
+        request.piece_offset = 0
+        request.pieces = list(self.trajectory_pieces)
+        self.upload_future = self.upload_trajectory_client.call_async(
+            request)
+        return self.upload_future
 
-    def send_notify_setpoints_stop(self, remain_valid_millisecs=100):
-        """Tell the firmware/sim streaming setpoints are ending, so it reverts
-        to high-level command mode -- required before go_to()/land() will work
-        again after cmd_full_state streaming (crazyswarm2 API contract)."""
-        req = NotifySetpointsStop.Request()
-        req.group_mask = 0
-        req.remain_valid_millisecs = remain_valid_millisecs
-        self.notify_setpoints_stop_client.call_async(req)
+    def start_trajectory(self):
+        request = StartTrajectory.Request()
+        request.group_mask = 0
+        request.trajectory_id = self.TRAJECTORY_ID
+        request.timescale = 1.0
+        request.reversed = False
+        request.relative = False
+        self.start_future = self.start_trajectory_client.call_async(
+            request)
+        return self.start_future
 
     def send_emergency(self):
-        """Emergency motor cut-off -- fire-and-forget, non-blocking. This is a
-        hard stop (motors off, the drone drops), NOT a graceful land."""
         self.emergency_client.call_async(Empty.Request())
 
 
@@ -201,6 +192,9 @@ class ControlNode(Node):
         self.declare_parameter('start_immediately', False)
         self.declare_parameter('dead_zone_margin', 0.15)
         self.declare_parameter('arrival_radius', 0.25)
+        self.declare_parameter('trajectory_settle_time', 1.0)
+        self.declare_parameter('safety_boundary_margin', 0.75)
+        self.declare_parameter('safety_violation_ticks', 3)
 
         self.drone_ids = list(self.get_parameter('drone_ids').value)
         self.min_leg_duration = self.get_parameter('min_leg_duration').value
@@ -211,6 +205,12 @@ class ControlNode(Node):
         self.land_settle_time = self.get_parameter('land_settle_time').value
         self.arrival_radius = self.get_parameter('arrival_radius').value
         self.dead_zone_margin = self.get_parameter('dead_zone_margin').value
+        self.trajectory_settle_time = float(
+            self.get_parameter('trajectory_settle_time').value)
+        self.safety_boundary_margin = float(
+            self.get_parameter('safety_boundary_margin').value)
+        self.safety_violation_ticks = max(
+            1, int(self.get_parameter('safety_violation_ticks').value))
 
         mission_map_path = self.get_parameter('mission_map_path').value
         if not mission_map_path:
@@ -218,16 +218,31 @@ class ControlNode(Node):
                 'mission_control requires the mission_map_path parameter '
                 '(path to mission_map.yaml)')
         self.mission_map = self._load_mission_map(mission_map_path)
+        self.trajectory_settle_time = float(
+            self.mission_map.get(
+                'trajectory_settle_time',
+                self.trajectory_settle_time,
+            )
+        )
+        self.safety_boundary_margin = float(
+            self.mission_map.get(
+                'safety_boundary_margin',
+                self.safety_boundary_margin,
+            )
+        )
         self.cruise_altitude = float(self.mission_map['uav_cruise_altitude'])
         self.coverage_line_spacing = float(self.mission_map['coverage_line_spacing'])
-        # Coverage streaming reference speed, m/s (control_node's
-        # cmd_full_state advances along the path at this rate) -- kept in
-        # mission_map.yaml, not a launch/ROS parameter, so it can just be
-        # edited there like every other mission-tuning value (cruise
-        # altitude, line spacing, ...). Lower it if cells are being missed:
-        # the drone tracks a faster-moving reference more loosely, so it may
-        # never come within arrival_radius of every cell center.
-        self.cruise_speed = float(self.mission_map.get('cruise_speed', 0.3))
+        # Desired peak speed for the onboard polynomial trajectory.
+        # The segment duration accounts for the 7th-order smoothstep's
+        # derivative peak, so the actual peak speed stays near this value.
+        self.cruise_speed = max(
+            0.05, float(self.mission_map.get('cruise_speed', 0.20)))
+        self.safety_max_altitude = float(
+            self.mission_map.get(
+                'safety_max_altitude',
+                self.cruise_altitude + 0.60,
+            )
+        )
 
         self.drones = {}
         # home_position here is just a startup placeholder -- _do_plan() below
@@ -260,7 +275,8 @@ class ControlNode(Node):
 
         self.detections_sub = self.create_subscription(
             MarkerDetection, '/detections', self._on_detection, 10)
-        self.detected_markers = {}  # marker_id -> (x, y, z)
+        self.detected_markers = {}  # canonical marker_id -> (x, y, z)
+        self.marker_sources = {}    # canonical marker_id -> drone_id
 
         # Real measured position per drone (from /states, same feed cf_perception
         # publishes for the GCS). Used instead of blindly assuming a drone has
@@ -269,9 +285,23 @@ class ControlNode(Node):
         # the next leg's distance from a *wrong* assumed start point produces a
         # too-short duration for the real distance still left to cover, which
         # crazyswarm2's own go_to docs warn drives an unstable/runaway trajectory.
-        self.states_sub = self.create_subscription(
-            DroneState, '/states', self._on_drone_state, 20)
-        self.live_xy = {}  # drone_id -> (x, y)
+        # Flight monitoring subscribes directly to crazyflie_server pose
+        # topics. It does not depend on the Docker perception process.
+        self.live_xy = {}   # drone_id -> (x, y)
+        self.live_xyz = {}  # drone_id -> (x, y, z)
+        self.live_state_time = {}  # drone_id -> monotonic timestamp
+        self._safety_violations = {
+            drone_id: 0 for drone_id in self.drone_ids}
+        self.pose_subscriptions = []
+        for drone_id in self.drone_ids:
+            self.pose_subscriptions.append(
+                self.create_subscription(
+                    PoseStamped,
+                    f'/{drone_id}/pose',
+                    self._make_pose_callback(drone_id),
+                    20,
+                )
+            )
 
         self._start_requested = self.get_parameter('start_immediately').value
         self.start_srv = self.create_service(Trigger, '/mission/start', self._on_start_request)
@@ -285,7 +315,14 @@ class ControlNode(Node):
         self.state = 'PREPARE'
         self._phase_deadline = None
         self._takeoff_sent = False
+        self._align_sent = False
+        self._trajectory_started = False
+        self._trajectory_start_sent = False
+        self._trajectory_start_request_time = None
+        self._upload_deadline = None
         self._land_sent = False
+        self._safety_land_sent = False
+        self._upload_started = False
 
         self.timer = self.create_timer(0.1, self._tick)
         self.get_logger().info('control_node started, state=PREPARE')
@@ -302,25 +339,47 @@ class ControlNode(Node):
         self.state_pub.publish(String(data=new_state))
 
     # ---- callbacks ---------------------------------------------------
-    def _on_drone_state(self, msg):
-        self.live_xy[msg.drone_id] = (msg.position.x, msg.position.y)
+    def _make_pose_callback(self, drone_id):
+        def callback(message):
+            xyz = (
+                float(message.pose.position.x),
+                float(message.pose.position.y),
+                float(message.pose.position.z),
+            )
+            self.live_xy[drone_id] = xyz[:2]
+            self.live_xyz[drone_id] = xyz
+            self.live_state_time[drone_id] = (
+                time.monotonic())
+        return callback
 
     def _on_detection(self, msg):
-        is_new = msg.marker_id not in self.detected_markers
-        if is_new:
-            self.get_logger().info(
-                f'marker {msg.marker_id} detected by {msg.drone_id} at '
-                f'({msg.position.x:.2f}, {msg.position.y:.2f})')
-        self.detected_markers[msg.marker_id] = (
-            msg.position.x, msg.position.y, msg.position.z)
-        # Republish /mission/markers on every *new* marker (not just once at
-        # mission end) -- latched, so a UGV consumer sees markers as they're
-        # found and can start routing to them mid-mission instead of waiting
-        # for the whole aerial sweep to finish. Skip on repeat sightings of
-        # an already-known marker (a position update to an existing id) to
-        # avoid republishing on every single detection frame.
-        if is_new:
+        """Store canonical marker identities from the perception registry.
+
+        Mission control does not apply a spatial radius, per-drone quota, or
+        object-count assumption. Arbitrary nearby objects remain independent.
+        """
+        marker_id = int(msg.marker_id)
+        position = (
+            float(msg.position.x),
+            float(msg.position.y),
+            float(msg.position.z),
+        )
+        source = str(msg.drone_id)
+
+        if marker_id in self.detected_markers:
+            # A repeated report for the same canonical ID is an update, not a
+            # new target.
+            self.detected_markers[marker_id] = position
+            self.marker_sources[marker_id] = source
             self._publish_markers()
+            return
+
+        self.detected_markers[marker_id] = position
+        self.marker_sources[marker_id] = source
+        self.get_logger().info(
+            f'marker {marker_id} detected by {source} at '
+            f'({position[0]:.2f}, {position[1]:.2f})')
+        self._publish_markers()
 
     def _on_start_request(self, request, response):
         self._start_requested = True
@@ -344,38 +403,52 @@ class ControlNode(Node):
 
     # ---- FSM -----------------------------------------------------
     def _tick(self):
-        # Emergency kill: motors are already cut in _on_kill_request; make sure
-        # the FSM never sends another command from here on.
         if self._killed:
             return
+
         now = time.monotonic()
+        if self.state in {
+            'TAKEOFF',
+            'ALIGN_HOME',
+            'START_COVERAGE',
+            'COVERING',
+            'RETURN_HOME',
+        }:
+            if self._check_flight_envelope(now):
+                return
+
         if self.state == 'PREPARE':
             self._do_decompose()
             self._do_plan()
             self._publish_plan()
-            self._set_state('AWAITING_START')
+            self._begin_trajectory_uploads()
+            self._set_state('UPLOADING_TRAJECTORIES')
+        elif self.state == 'UPLOADING_TRAJECTORIES':
+            if self._trajectory_uploads_finished():
+                self._set_state('AWAITING_START')
         elif self.state == 'AWAITING_START':
             if self._start_requested:
                 self._set_state('TAKEOFF')
         elif self.state == 'TAKEOFF':
             self._step_takeoff(now)
+        elif self.state == 'ALIGN_HOME':
+            self._step_align_home(now)
+        elif self.state == 'START_COVERAGE':
+            self._step_start_coverage(now)
         elif self.state == 'COVERING':
             self._step_covering(now)
         elif self.state == 'RETURN_HOME':
             self._step_return_home(now)
         elif self.state == 'LAND':
             self._step_land(now)
+        elif self.state == 'SAFETY_LAND':
+            self._step_safety_land(now)
         elif self.state == 'AWAITING_UGV_DONE':
-            # Placeholder for the (future) UGV routing node's completion signal
-            # -- once that node exists, this should block here (e.g. on a
-            # /mission/ugv_done service/topic) instead of falling straight
-            # through to DONE. Not implemented yet: there's no UGV node to
-            # signal completion, so this is documentation of the intended
-            # state, not real wait logic. See README's FUTURE UGV routing node.
             self.get_logger().info(
-                f'aerial mission complete, {len(self.detected_markers)} markers found: '
+                f'aerial mission complete, '
+                f'{len(self.detected_markers)} markers found: '
                 f'{sorted(self.detected_markers.keys())} -- '
-                'UGV completion wait not implemented yet, proceeding to DONE')
+                'UGV completion wait not implemented; proceeding to DONE')
             self._set_state('DONE')
         elif self.state == 'DONE':
             pass
@@ -393,30 +466,164 @@ class ControlNode(Node):
         self.zone_cells = assign_cells_to_drones(cells, self.drone_ids)
 
     @staticmethod
-    def _build_cum_dist(waypoints):
-        """cum_dist[i] = arc length walked along the path from waypoints[0] to
-        waypoints[i] -- lets _step_covering turn "elapsed time x cruise_speed"
-        into a position along the whole ㄹ path with a simple lookup/interp."""
-        cum = [0.0]
-        for i in range(1, len(waypoints)):
-            cum.append(cum[-1] + dist2d(waypoints[i - 1], waypoints[i]))
-        return cum
+    def _compress_collinear_waypoints(waypoints):
+        """Keep only start/end and direction-change points."""
+        cleaned = []
+        for point in waypoints:
+            point = (float(point[0]), float(point[1]))
+            if not cleaned or dist2d(cleaned[-1], point) > 1.0e-6:
+                cleaned.append(point)
+
+        if len(cleaned) <= 2:
+            return cleaned
+
+        compressed = [cleaned[0]]
+        for index in range(1, len(cleaned) - 1):
+            previous = cleaned[index - 1]
+            current = cleaned[index]
+            following = cleaned[index + 1]
+
+            first_dx = current[0] - previous[0]
+            first_dy = current[1] - previous[1]
+            second_dx = following[0] - current[0]
+            second_dy = following[1] - current[1]
+
+            cross = first_dx * second_dy - first_dy * second_dx
+            dot = first_dx * second_dx + first_dy * second_dy
+            if abs(cross) > 1.0e-7 or dot <= 0.0:
+                compressed.append(current)
+
+        compressed.append(cleaned[-1])
+        return compressed
+
+    @staticmethod
+    def _septic_coefficients(start_value, end_value, duration):
+        """Degree-7 smoothstep: zero velocity/acceleration/jerk at both ends."""
+        duration = max(float(duration), 1.0e-3)
+        delta = float(end_value) - float(start_value)
+        return [
+            float(start_value),
+            0.0,
+            0.0,
+            0.0,
+            35.0 * delta / duration**4,
+            -84.0 * delta / duration**5,
+            70.0 * delta / duration**6,
+            -20.0 * delta / duration**7,
+        ]
+
+    def _segment_duration(self, start_xy, end_xy):
+        distance = dist2d(start_xy, end_xy)
+        if distance <= 1.0e-6:
+            return 0.0
+
+        # max(ds/du) for 35u^4-84u^5+70u^6-20u^7 is 2.1875.
+        # This keeps polynomial peak velocity near cruise_speed.
+        speed_limited = 2.20 * distance / self.cruise_speed
+        return max(float(self.min_leg_duration), speed_limited)
+
+    def _build_trajectory(self, waypoints):
+        flight_waypoints = self._compress_collinear_waypoints(
+            waypoints)
+        pieces = []
+        total_duration = 0.0
+
+        for start_xy, end_xy in zip(
+            flight_waypoints[:-1],
+            flight_waypoints[1:],
+        ):
+            duration = self._segment_duration(
+                start_xy, end_xy)
+            if duration <= 0.0:
+                continue
+
+            piece = TrajectoryPolynomialPiece()
+            piece.duration = seconds_to_duration_msg(duration)
+            piece.poly_x = self._septic_coefficients(
+                start_xy[0], end_xy[0], duration)
+            piece.poly_y = self._septic_coefficients(
+                start_xy[1], end_xy[1], duration)
+            piece.poly_z = [
+                self.cruise_altitude,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+            piece.poly_yaw = [0.0] * 8
+            pieces.append(piece)
+            total_duration += duration
+
+        return flight_waypoints, pieces, total_duration
 
     def _do_plan(self):
-        # Home is *derived from* the assigned zone (its first cell), not the
-        # other way around -- a drone assigned to the 3rd region should spawn
-        # inside the 3rd region, not at some unrelated pre-given point that
-        # then needs a long straight commute to reach its own zone.
         for drone_id, handle in self.drones.items():
             cells = self.zone_cells[drone_id]
             handle.waypoints = plan_coverage(cells)
             if handle.waypoints:
                 home_xy = handle.waypoints[0]
-                handle.home_position = (home_xy[0], home_xy[1], 0.0)
-                handle.last_target_xy = home_xy
-            handle.cum_dist = self._build_cum_dist(handle.waypoints)
+                handle.home_position = (
+                    float(home_xy[0]),
+                    float(home_xy[1]),
+                    0.0,
+                )
+                handle.last_target_xy = (
+                    float(home_xy[0]),
+                    float(home_xy[1]),
+                )
+
+            (
+                handle.flight_waypoints,
+                handle.trajectory_pieces,
+                handle.trajectory_duration,
+            ) = self._build_trajectory(handle.waypoints)
+
             handle.arrived_index = 0
-            handle.done = len(handle.waypoints) <= 1  # index 0 is home itself, nothing to fly
+            handle.done = len(handle.trajectory_pieces) == 0
+
+            self.get_logger().info(
+                f'{drone_id}: coverage cells={len(handle.waypoints)}, '
+                f'flight turns={len(handle.flight_waypoints)}, '
+                f'pieces={len(handle.trajectory_pieces)}, '
+                f'duration={handle.trajectory_duration:.1f}s')
+
+    def _begin_trajectory_uploads(self):
+        for handle in self.drones.values():
+            if handle.trajectory_pieces:
+                handle.upload_trajectory()
+            else:
+                handle.upload_future = None
+        self._upload_started = True
+        self._upload_deadline = time.monotonic() + 30.0
+        self.get_logger().info(
+            'uploading onboard polynomial trajectories')
+
+    def _trajectory_uploads_finished(self):
+        if not self._upload_started:
+            return False
+        if time.monotonic() > self._upload_deadline:
+            raise RuntimeError(
+                'trajectory upload timed out after 30s')
+
+        for handle in self.drones.values():
+            future = handle.upload_future
+            if future is None:
+                continue
+            if not future.done():
+                return False
+            exception = future.exception()
+            if exception is not None:
+                raise RuntimeError(
+                    f'{handle.drone_id} trajectory upload failed: '
+                    f'{exception}')
+
+        self.get_logger().info(
+            'all onboard trajectories uploaded')
+        self._upload_started = False
+        return True
 
     def _publish_plan(self):
         # Zone is visualized as one small square per assigned cell (rather than
@@ -461,39 +668,102 @@ class ControlNode(Node):
     def _step_takeoff(self, now):
         if not self._takeoff_sent:
             for handle in self.drones.values():
-                handle.send_takeoff(self.cruise_altitude, self.takeoff_duration)
+                handle.send_takeoff(
+                    self.cruise_altitude,
+                    self.takeoff_duration,
+                )
             self._takeoff_sent = True
-            self._phase_deadline = now + self.takeoff_duration + self.takeoff_settle_time
-            self.get_logger().info('takeoff sent to all drones')
+            self._phase_deadline = (
+                now
+                + self.takeoff_duration
+                + self.takeoff_settle_time
+            )
+            self.get_logger().info(
+                'onboard takeoff sent to all drones')
         elif now >= self._phase_deadline:
-            self._init_covering()
-            self._set_state('COVERING')
+            self._align_sent = False
+            self._set_state('ALIGN_HOME')
 
-    def _init_covering(self):
-        now = time.monotonic()
+    def _step_align_home(self, now):
+        """Align each drone with the first trajectory point using one slow go_to."""
+        if not self._align_sent:
+            max_duration = 0.0
+            for handle in self.drones.values():
+                home_xy = (
+                    handle.home_position[0],
+                    handle.home_position[1],
+                )
+                current_xy = self.live_xy.get(
+                    handle.drone_id,
+                    home_xy,
+                )
+                duration = self._segment_duration(
+                    current_xy, home_xy)
+                duration = max(
+                    float(self.min_leg_duration),
+                    duration,
+                )
+                handle.send_go_to(
+                    (
+                        home_xy[0],
+                        home_xy[1],
+                        self.cruise_altitude,
+                    ),
+                    0.0,
+                    duration,
+                )
+                max_duration = max(
+                    max_duration, duration)
+
+            self._align_sent = True
+            self._phase_deadline = (
+                now
+                + max_duration
+                + self.leg_settle_margin
+            )
+            self.get_logger().info(
+                'aligning drones to trajectory start points')
+        elif now >= self._phase_deadline:
+            self._set_state('START_COVERAGE')
+
+    def _step_start_coverage(self, now):
+        if not self._trajectory_start_sent:
+            for handle in self.drones.values():
+                handle.visited_mask = set()
+                handle.arrived_index = 0
+                handle.done = not bool(
+                    handle.trajectory_pieces)
+                handle.start_future = None
+                if handle.trajectory_pieces:
+                    handle.start_trajectory()
+
+            self._trajectory_start_sent = True
+            self._trajectory_start_request_time = now
+            self.get_logger().info(
+                'starting onboard coverage trajectories')
+            return
+
         for handle in self.drones.values():
-            handle.covering_start_time = now
-            handle.arrived_index = 0
-            handle.visited_mask = set()
-            handle.done = len(handle.waypoints) <= 1
-            handle.last_target_xy = (handle.home_position[0], handle.home_position[1])
-        self._publish_progress()
+            future = handle.start_future
+            if future is None:
+                continue
+            if not future.done():
+                return
+            exception = future.exception()
+            if exception is not None:
+                raise RuntimeError(
+                    f'{handle.drone_id} trajectory start failed: '
+                    f'{exception}')
 
-    @staticmethod
-    def _interpolate_path(waypoints, cum_dist, target_dist):
-        """Position `target_dist` meters along the polyline `waypoints`."""
-        if target_dist <= 0.0:
-            return waypoints[0]
-        if target_dist >= cum_dist[-1]:
-            return waypoints[-1]
-        for i in range(1, len(cum_dist)):
-            if cum_dist[i] >= target_dist:
-                seg_len = cum_dist[i] - cum_dist[i - 1]
-                t = 0.0 if seg_len <= 1e-9 else (target_dist - cum_dist[i - 1]) / seg_len
-                x0, y0 = waypoints[i - 1]
-                x1, y1 = waypoints[i]
-                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-        return waypoints[-1]
+        for handle in self.drones.values():
+            handle.covering_start_time = (
+                self._trajectory_start_request_time)
+
+        self._trajectory_started = True
+        self._publish_progress()
+        self.get_logger().info(
+            'all onboard coverage trajectories accepted')
+        self._set_state('COVERING')
 
     def _publish_progress(self):
         array = DroneProgressArray()
@@ -507,22 +777,11 @@ class ControlNode(Node):
         self.progress_pub.publish(array)
 
     def _update_visited_cells(self, handle):
-        """Mark cells visited using the drone's *live measured* position
-        (self.live_xy, from /states), not the commanded streaming reference.
+        """Mark coverage cells only from the measured /states position.
 
-        The reference in _step_covering slides continuously regardless of
-        where the drone actually is, so deriving "visited" from the
-        reference's own progress paints the GCS map ahead of the real
-        drone -- exactly the "미리 채워지는" bug reported. Since control no
-        longer waits for arrival to advance the reference (that coupling is
-        what caused the earlier understeer/corner-cutting issue), gating
-        *only the progress readout* on real position is now safe: it can't
-        stall the reference, it just reports true visited cells.
-
-        Every not-yet-visited waypoint is checked each tick (not just the
-        next one in path order) so that cutting a corner and missing one
-        cell doesn't permanently block every later cell from being marked
-        visited -- only that one cell stays unvisited.
+        The onboard trajectory runs independently of GCS progress. Every
+        unvisited cell is checked so one missed corner cannot block later
+        cells from being reported correctly.
         """
         live_xy = self.live_xy.get(handle.drone_id)
         if live_xy is None:
@@ -539,64 +798,70 @@ class ControlNode(Node):
         return changed
 
     def _step_covering(self, now):
-        """Stream each active drone's absolute position reference, sliding
-        along its own ㄹ path at `cruise_speed` (arc-length parameterized) --
-        see module docstring for why this replaces discrete per-cell go_to
-        calls. Each drone advances completely independently of the others.
-        Progress (for GCS "visited cell" painting) is derived separately,
-        from live measured position -- see _update_visited_cells.
-        """
+        """Monitor onboard trajectories; no periodic flight setpoints are sent."""
         progress_changed = False
+
         for handle in self.drones.values():
-            if handle.done:
-                if self._update_visited_cells(handle):
-                    progress_changed = True
-                continue
-            elapsed = now - handle.covering_start_time
-            target_dist = elapsed * self.cruise_speed
-            total_dist = handle.cum_dist[-1]
-            if target_dist >= total_dist:
-                target_dist = total_dist
-                handle.done = True
-                handle.send_notify_setpoints_stop()  # hand back to high-level mode
-
-            ref_xy = self._interpolate_path(handle.waypoints, handle.cum_dist, target_dist)
-            handle.send_cmd_full_state(ref_xy, self.cruise_altitude)
-
             if self._update_visited_cells(handle):
                 progress_changed = True
+
+            if handle.done:
+                continue
+
+            elapsed = now - handle.covering_start_time
+            if elapsed >= (
+                handle.trajectory_duration
+                + self.trajectory_settle_time
+            ):
+                handle.done = True
+                self.get_logger().info(
+                    f'{handle.drone_id}: onboard trajectory complete '
+                    f'after {elapsed:.1f}s')
 
         if progress_changed:
             self._publish_progress()
 
         if all(handle.done for handle in self.drones.values()):
             self._returning_sent = False
-            # notify_setpoints_stop() needs a moment to actually take effect
-            # before go_to() will be accepted again -- see _step_return_home.
-            self._return_home_not_before = now + 0.2
             self._set_state('RETURN_HOME')
 
     def _step_return_home(self, now):
-        # Give notify_setpoints_stop() (sent as each drone finished its
-        # streamed coverage sweep) a brief moment to actually take effect --
-        # go_to() is a high-level command and won't be honored until the
-        # firmware/sim has reverted out of streaming-setpoint mode.
-        if now < getattr(self, '_return_home_not_before', 0.0):
-            return
         if not getattr(self, '_returning_sent', False):
             max_duration = 0.0
             for handle in self.drones.values():
-                home_xy = (handle.home_position[0], handle.home_position[1])
-                current_xy = self.live_xy.get(handle.drone_id, handle.last_target_xy)
-                leg_dist = dist2d(current_xy, home_xy)
-                duration = max(self.min_leg_duration, leg_dist / self.cruise_speed)
+                home_xy = (
+                    handle.home_position[0],
+                    handle.home_position[1],
+                )
+                current_xy = self.live_xy.get(
+                    handle.drone_id,
+                    handle.last_target_xy,
+                )
+                duration = max(
+                    float(self.min_leg_duration),
+                    self._segment_duration(
+                        current_xy, home_xy),
+                )
                 handle.send_go_to(
-                    (home_xy[0], home_xy[1], self.cruise_altitude), 0.0, duration)
-                handle.last_target_xy = home_xy
-                max_duration = max(max_duration, duration)
+                    (
+                        home_xy[0],
+                        home_xy[1],
+                        self.cruise_altitude,
+                    ),
+                    0.0,
+                    duration,
+                )
+                max_duration = max(
+                    max_duration, duration)
+
             self._returning_sent = True
-            self._phase_deadline = now + max_duration + self.leg_settle_margin
-            self.get_logger().info('returning to home positions')
+            self._phase_deadline = (
+                now
+                + max_duration
+                + self.leg_settle_margin
+            )
+            self.get_logger().info(
+                'returning to home positions with onboard go_to')
         elif now >= self._phase_deadline:
             self._land_sent = False
             self._set_state('LAND')
@@ -604,12 +869,93 @@ class ControlNode(Node):
     def _step_land(self, now):
         if not self._land_sent:
             for handle in self.drones.values():
-                handle.send_land(0.02, self.land_duration)
+                handle.send_land(
+                    0.02, self.land_duration)
             self._land_sent = True
-            self._phase_deadline = now + self.land_duration + self.land_settle_time
-            self.get_logger().info('land sent to all drones')
+            self._phase_deadline = (
+                now
+                + self.land_duration
+                + self.land_settle_time
+            )
+            self.get_logger().info(
+                'onboard land sent to all drones')
         elif now >= self._phase_deadline:
             self._set_state('AWAITING_UGV_DONE')
+
+    def _flight_bounds(self):
+        boundary = [
+            tuple(point)
+            for point in self.mission_map['boundary']
+        ]
+        xs = [point[0] for point in boundary]
+        ys = [point[1] for point in boundary]
+        margin = self.safety_boundary_margin
+        return (
+            min(xs) - margin,
+            max(xs) + margin,
+            min(ys) - margin,
+            max(ys) + margin,
+        )
+
+    def _check_flight_envelope(self, now):
+        """Repeated gross envelope violations trigger an onboard safety land."""
+        min_x, max_x, min_y, max_y = self._flight_bounds()
+
+        for drone_id, xyz in self.live_xyz.items():
+            x, y, z = xyz
+            stale = (
+                now
+                - self.live_state_time.get(drone_id, now)
+            ) > 1.0
+            if stale:
+                continue
+
+            violated = (
+                x < min_x
+                or x > max_x
+                or y < min_y
+                or y > max_y
+                or z > self.safety_max_altitude
+                or z < -0.20
+            )
+
+            if violated:
+                self._safety_violations[drone_id] += 1
+            else:
+                self._safety_violations[drone_id] = 0
+
+            if (
+                self._safety_violations[drone_id]
+                >= self.safety_violation_ticks
+            ):
+                self.get_logger().error(
+                    f'{drone_id} left flight envelope at '
+                    f'({x:.2f}, {y:.2f}, {z:.2f}); '
+                    'commanding safety land')
+                self._trigger_safety_land(now)
+                return True
+
+        return False
+
+    def _trigger_safety_land(self, now):
+        if self._safety_land_sent:
+            return
+        for handle in self.drones.values():
+            handle.send_land(
+                0.02, self.land_duration)
+        self._safety_land_sent = True
+        self._phase_deadline = (
+            now
+            + self.land_duration
+            + self.land_settle_time
+        )
+        self._set_state('SAFETY_LAND')
+
+    def _step_safety_land(self, now):
+        if now >= self._phase_deadline:
+            self.get_logger().error(
+                'mission aborted after safety land')
+            self._set_state('DONE')
 
     def _publish_markers(self):
         """Publishes the full current detected_markers set to /mission/markers

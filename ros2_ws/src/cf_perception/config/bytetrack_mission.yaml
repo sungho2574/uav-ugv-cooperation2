@@ -1,0 +1,11 @@
+# Persistent tracking tuned for slow survey flight.  Low-confidence boxes may
+# recover an existing track, but only >=0.5 detections may start a new one.
+tracker_type: bytetrack
+track_high_thresh: 0.5
+track_low_thresh: 0.25
+new_track_thresh: 0.5
+# AI-deck streams are low-FPS; keep a lost identity for roughly a minute
+# instead of Ultralytics' short 30-frame default.
+track_buffer: 300
+match_thresh: 0.8
+fuse_score: true

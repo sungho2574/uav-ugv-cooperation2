@@ -1,88 +1,79 @@
-# Known survey-area map, loaded directly (plain YAML, not a ROS2 parameter file).
-# control_node is given the path to this file via the `mission_map_path` parameter
-# and parses it itself with PyYAML. boundary is CCW; dead_zones are holes excluded
-# from coverage.
-frame_id: "map"
-grid_resolution: 0.10
-uav_cruise_altitude: 0.5 # meters -- 50cm
+frame_id: map
+grid_resolution: 0.1
+uav_cruise_altitude: 0.5
 coverage_line_spacing: 0.5
 marker_size: 0.14
-
-# Real-hardware object detection backend for real_perception_node (sim always
-# uses ground-truth from true_markers.yaml regardless of this setting -- see
-# sim_perception_node.py). See docs/map_configuration.md sec. 7 for full
-# tuning guidance for both backends.
-#   aruco - fiducial markers (DICT_6X6_250), persistent ID + solvePnP depth.
-#   yolo  - YOLOv8-ONNX object detector; no depth/ID from a single frame, so
-#           position comes from casting a ray through the camera to the
-#           ground plane (yolo.target_height) and identity is approximated by
-#           bucketing detections' world position (yolo.cluster_radius).
-# detection_backend: "aruco"
-detection_backend: "yolo"
-
-# Where real_perception_node actually runs.
-#   native (default) - launched as a plain ROS2 node on this machine, same
-#     as every other node here. Use this on a laptop/dev machine where
-#     `pip install ultralytics` (which pulls torch) just works.
-#   docker - launched inside the cf_perception:jetson container (see
-#     cf_perception/docker/) instead, talking to the rest of the mission
-#     over ROS2 DDS via network_mode: host. Use this on the Jetson, where a
-#     JetPack-matched torch/ultralytics build is fragile to install natively
-#     but the ultralytics/ultralytics jetson-jetpack6 base image already has
-#     it working. Build the image once ahead of time with
-#     `cd ros2_ws/src/cf_perception/docker && docker compose build`
-#     before launching with this set to "docker" -- real.launch.py does NOT
-#     build it automatically (way too slow to happen inline on every launch).
-perception_runtime: "docker"
-# Only read when perception_runtime is "docker" -- the image tag built above.
-docker_image: "cf_perception:jetson"
-
+detection_backend: yolo
+perception_runtime: docker
+docker_image: cf_perception:jetson
+cruise_speed: 0.28
+trajectory_settle_time: 0.6
+safety_boundary_margin: 0.75
+safety_max_altitude: 1.1
 yolo:
-  # Empty -> real.launch.py defaults to cf_perception's installed
-  # share/weights/human_yolo11n_gray.onnx (see DEFAULT_YOLO_WEIGHTS_FILENAME
-  # there). Set an absolute path here to use a different model instead.
-  weights_path: ""
-  # Class names always come from the .onnx's own export metadata (no override
-  # field here) -- see docs/map_configuration.md sec. 8.4.
-  confidence_threshold: 0.5
-  nms_threshold: 0.45
-  # Input size is NOT configured here either -- it's read from the .onnx's own
-  # export metadata (see docs/map_configuration.md sec. 8.4). A model exported
-  # with a static input shape (e.g. 416x416) will fail with an onnxruntime
-  # shape-mismatch error if forced to a different size.
-  target_height: 0.0 # object height off the floor, m (e.g. a lying-down survivor model)
-  cluster_radius: 0.5 # dedup radius, m -- same-class detections closer than this merge into one record
-
-# COVERING-phase streaming reference speed, m/s. Lower this if cells are
-# being missed (visited_indices gaps in /mission/progress): the drone
-# tracks a faster-moving cmd_full_state reference more loosely, so it may
-# never come within control_node's `arrival_radius` parameter of every cell
-# center. See control_node.py's _step_covering/_update_visited_cells.
-cruise_speed: 0.2
-
-boundary: [[0.0, 0.0], [4.0, 0.0], [4.0, 4.3], [0.0, 4.3]]
-
-# Kept in a corner on purpose: coverage_plan.py's ㄹ-shape sweep has no
-# hole-avoidance logic at all -- it just skips a cell if it's not in the
-# assigned cell list. A dead zone in the middle of a zone would cut a gap out
-# of the *middle* of some row, which the naive sweep would jump straight
-# across; tucked into a corner it only ever trims the end of a row instead.
+  weights_path: ''
+  camera_pitch_degs:
+  - 45.0
+  camera_latency_sec: 0.0
+  pose_tolerance_sec: 0.6
+  confidence_threshold: 0.15
+  low_confidence_threshold: 0.03
+  nms_threshold: 0.5
+  image_size: 416
+  maximum_detections: 20
+  force_grayscale: true
+  use_clahe: false
+  track_buffer: 120
+  match_threshold: 0.63
+  new_track_threshold: 0.17
+  target_height: 0.0
+  max_ground_range: 3.2
+  min_downward_ray: 0.05
+  registry_sample_window: 24
+  registry_confirmation_hits: 3
+  registry_minimum_confirmation_age: 0.2
+  registry_distinct_evidence_frames: 2
+  registry_distinct_maximum_bbox_iou: 0.2
+  registry_distinct_minimum_pixel_distance: 16.0
+  registry_tracklet_timeout: 18.0
+  registry_maximum_ray_residual: 0.28
+  registry_ray_inlier_threshold: 0.28
+  registry_ray_match_threshold: 0.2
+  registry_minimum_parallax_deg: 1.0
+  registry_minimum_baseline: 0.04
+  registry_minimum_triangulation_inliers: 3
+  registry_covariance_floor: 0.2
+  registry_association_chi2_gate: 16.0
+  registry_association_max_distance: 0.3
+  registry_ambiguity_chi2_gate: 36.0
+  registry_ambiguity_max_distance: 0.7
+  registry_duplicate_minimum_bbox_iou: 0.15
+  registry_duplicate_maximum_pixel_distance: 24.0
+  registry_bundle_inlier_threshold: 0.18
+  registry_bundle_minimum_group_inlier_ratio: 0.85
+  registry_bundle_maximum_group_median_error: 0.15
+  registry_appearance_merge_threshold: 0.12
+  registry_appearance_max_distance: 0.9
+  registry_hypothesis_spatial_gate: 0.3
+  registry_hypothesis_minimum_tracklets: 2
+  registry_hypothesis_minimum_separation: 0.3
+  registry_hypothesis_separation_chi2: 12.0
+  registry_hypothesis_timeout: 60.0
+boundary:
+- - 0.0
+  - 0.0
+- - 4.0
+  - 0.0
+- - 4.0
+  - 4.3
+- - 0.0
+  - 4.3
 dead_zones:
-  - name: "obstacle_1"
-    points: []
-
-# Drone identity/count is NOT configured here -- crazyswarm2 already requires
-# crazyflies.yaml (mission_bringup/config/crazyflies.yaml) to exist and list
-# every robot with its radio uri/type, so that file is the single source of
-# truth for which drones fly: sim.launch.py/real.launch.py read its `enabled`
-# robots and use that as the drone_ids list everywhere (control_node,
-# cf_perception, gcs_dashboard). To fly with fewer than 3 drones, toggle
-# `enabled` per-robot in crazyflies.yaml -- nothing to change here.
-# Each drone's actual spawn point/home is computed at launch time as the
-# first cell of whichever zone it's assigned (Nth enabled drone in
-# crazyflies.yaml -> Nth region, left to right); home_yaw is always 0
-# (hardcoded in control_node.py, not configurable). See coverage_plan.py.
-
+- name: obstacle_1
+  points: []
 ugv:
-  start_position: [0.5, 0.0, 0.0]
+  start_position:
+  - 0.5
+  - 0.0
+  - 0.0
   start_yaw: 0.0

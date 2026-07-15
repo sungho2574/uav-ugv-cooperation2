@@ -1,24 +1,18 @@
-# crazyswarm2-native robot config, passed to crazyflie/launch/launch.py via
-# crazyflies_yaml_file:=<this file>. initial_position matches each drone's
-# home_position in mission_map.yaml so sim/real start where control_node expects.
 fileversion: 3
 
 robots:
-  # uri is the drone's actual radio address burned into its firmware --
-  # unrelated to the "cf6/cf7/cf8" label, which is just our own naming.
-  # cf8's E7E7E7E7E8 was confirmed against cfclient's successful connection;
-  # cf6/cf7 below just follow the same last-nibble pattern as a guess and are
-  # UNVERIFIED -- check each one in cfclient before relying on it.
   cf6:
     enabled: true
     uri: radio://0/80/2M/E7E7E7E7E6
     initial_position: [0.5, 0.5, 0.0]
     type: cf21
+
   cf7:
     enabled: true
     uri: radio://0/80/2M/E7E7E7E7E7
     initial_position: [0.5, 3.0, 0.0]
     type: cf21
+
   cf8:
     enabled: false
     uri: radio://0/80/2M/E7E7E7E7E8
@@ -41,9 +35,10 @@ all:
     enabled: true
     default_topics:
       pose:
-        frequency: 10
+        frequency: 20
       status:
-        frequency: 1
+        frequency: 2
+
   firmware_params:
     commander:
       enHighLevel: 1
@@ -53,7 +48,9 @@ all:
     locSrv:
       extPosStdDev: 1e-3
       extQuatStdDev: 0.5e-1
+
   reference_frame: "world"
+
   broadcasts:
     num_repeats: 15
     delay_between_repeats_ms: 1

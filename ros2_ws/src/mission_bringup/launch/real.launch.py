@@ -1,38 +1,3 @@
-"""Real-hardware mission: crazyswarm2 cflib (radio) backend + our 4 nodes.
-
-Only two things differ from sim.launch.py: the crazyswarm2 backend
-(backend:=cflib instead of sim) and the perception node
-(real_perception_node instead of sim_perception_node, which streams AI-deck
-WiFi video + runs ArUco instead of checking a ground-truth file).
-control_node and gcs_dashboard are unchanged -- same message contracts.
-
-real_perception_node itself can run two ways, picked by mission_map.yaml's
-`perception_runtime` field: "native" (a plain ROS2 node, same as everything
-else here) or "docker" (inside the cf_perception:jetson container, for hosts
-like the Jetson where installing a JetPack-matched torch/ultralytics build
-natively is fragile) -- see _build_docker_perception_process and
-cf_perception/docker/.
-
-NOTE: `mocap` is left False, i.e. drones fly on their own onboard state
-estimate over radio (no external motion-capture / lighthouse positioning).
-Position will drift over time on real hardware without an external position
-source -- that is a real limitation of this baseline, not something solved
-here. Also NOTE: fill in each AI-deck's actual WiFi AP IP address in
-mission_bringup/config/ai_deck_ips.yaml, and calibrate
-cf_perception/config/camera_intrinsics.yaml before trusting marker detections.
-
-IMPORTANT: each drone's home/spawn point is auto-computed as the first cell
-of its own assigned zone (same computation control_node itself runs -- see
-_compute_homes below), but on real hardware YOU still have to physically
-place each Crazyflie at that exact spot before launch -- unlike sim, nothing
-here moves the physical drone there. _generate_crazyflies_yaml pushes that
-same point into each drone's onboard kalman filter as its initial position
-(kalman.initialX/Y/Z + resetEstimation) so its own position estimate starts
-out matching where you actually put it -- crazyswarm2's real backend does
-NOT do this automatically from `initial_position` the way the sim backend
-does, so without this every real drone would think it starts at (0,0,0)
-regardless of where it was placed.
-"""
 import os
 import shutil
 import subprocess
@@ -41,7 +6,8 @@ import tempfile
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnProcessIO
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -58,6 +24,14 @@ DEAD_ZONE_MARGIN = 0.15
 # whenever mission_map.yaml's `yolo.weights_path` is left empty; set that
 # field to override with a different model without touching this file.
 DEFAULT_YOLO_WEIGHTS_FILENAME = 'human_yolo11n_gray.onnx'
+
+# The cflib backend creates ROS services before both Crazyflies have
+# necessarily finished TOC/log/parameter/memory initialization. Starting
+# trajectory upload during that interval can saturate the shared radio and
+# produce `Too many packets lost`. Start mission_control only after the
+# crazyflie_server reports that every Crazyflie is fully connected.
+CRAZYFLIES_READY_TEXT = b'All Crazyflies are fully connected!'
+PROCESS_IO_BUFFER_BYTES = 2048
 
 
 def _enabled_drone_ids(crazyflies_cfg):
@@ -250,18 +224,211 @@ def _build(context, *args, **kwargs):
         'drone_ids': drone_ids,
         'wifi_ips': wifi_ips,
         'wifi_port': 5000,
-        # `marker_size` used to be hardcoded here (duplicating and
-        # ignoring mission_map.yaml's own marker_size field) -- now reads
-        # the one true source, same pattern as detection_backend/yolo.*.
-        'marker_size': mission_map.get('marker_size', 0.14),
-        'camera_intrinsics_path': camera_intrinsics_path,
-        'detection_backend': mission_map.get('detection_backend', 'aruco'),
+        'marker_size': mission_map.get(
+            'marker_size', 0.14),
+        'camera_intrinsics_path': (
+            camera_intrinsics_path),
+        'camera_pitch_degs': [
+            float(value)
+            for value in yolo_cfg.get(
+                'camera_pitch_degs', [45.0])
+        ],
+        'camera_latency_sec': float(
+            yolo_cfg.get(
+                'camera_latency_sec', 0.0)),
+        'pose_tolerance_sec': float(
+            yolo_cfg.get(
+                'pose_tolerance_sec', 0.30)),
+        'detection_backend': mission_map.get(
+            'detection_backend', 'aruco'),
         'yolo_weights_path': yolo_weights_path,
-        'yolo_confidence_threshold': float(yolo_cfg.get('confidence_threshold', 0.5)),
-        'yolo_nms_threshold': float(yolo_cfg.get('nms_threshold', 0.45)),
-        'yolo_target_height': float(yolo_cfg.get('target_height', 0.0)),
-        'yolo_cluster_radius': float(yolo_cfg.get('cluster_radius', 0.5)),
+
+        # Neural detector and official per-drone BoT-SORT.
+        'yolo_confidence_threshold': float(
+            yolo_cfg.get(
+                'confidence_threshold', 0.35)),
+        'yolo_low_confidence_threshold': float(
+            yolo_cfg.get(
+                'low_confidence_threshold', 0.10)),
+        'yolo_nms_threshold': float(
+            yolo_cfg.get(
+                'nms_threshold', 0.45)),
+        'yolo_image_size': int(
+            yolo_cfg.get('image_size', 416)),
+        'yolo_maximum_detections': int(
+            yolo_cfg.get(
+                'maximum_detections', 20)),
+        'yolo_force_grayscale': bool(
+            yolo_cfg.get(
+                'force_grayscale', True)),
+        'yolo_use_clahe': bool(
+            yolo_cfg.get('use_clahe', False)),
+        'yolo_track_buffer': int(
+            yolo_cfg.get('track_buffer', 240)),
+        'yolo_match_threshold': float(
+            yolo_cfg.get(
+                'match_threshold', 0.80)),
+        'yolo_new_track_threshold': float(
+            yolo_cfg.get(
+                'new_track_threshold', 0.40)),
+
+        # Projection.
+        'yolo_target_height': float(
+            yolo_cfg.get('target_height', 0.0)),
+        'yolo_max_ground_range': float(
+            yolo_cfg.get(
+                'max_ground_range', 3.0)),
+        'yolo_min_downward_ray': float(
+            yolo_cfg.get(
+                'min_downward_ray', 0.08)),
+
+        # Static-object identity registry.
+        'registry_sample_window': int(
+            yolo_cfg.get(
+                'registry_sample_window', 40)),
+        'registry_confirmation_hits': int(
+            yolo_cfg.get(
+                'registry_confirmation_hits', 10)),
+        'registry_minimum_confirmation_age': float(
+            yolo_cfg.get(
+                'registry_minimum_confirmation_age',
+                1.0,
+            )),
+        'registry_maximum_ray_residual': float(
+            yolo_cfg.get(
+                'registry_maximum_ray_residual',
+                0.22,
+            )),
+        'registry_ray_inlier_threshold': float(
+            yolo_cfg.get(
+                'registry_ray_inlier_threshold',
+                0.24,
+            )),
+        'registry_ray_match_threshold': float(
+            yolo_cfg.get(
+                'registry_ray_match_threshold',
+                0.30,
+            )),
+        'registry_minimum_parallax_deg': float(
+            yolo_cfg.get(
+                'registry_minimum_parallax_deg',
+                5.0,
+            )),
+        'registry_minimum_baseline': float(
+            yolo_cfg.get(
+                'registry_minimum_baseline',
+                0.30,
+            )),
+        'registry_minimum_triangulation_inliers': int(
+            yolo_cfg.get(
+                'registry_minimum_triangulation_inliers',
+                7,
+            )),
+        'registry_covariance_floor': float(
+            yolo_cfg.get(
+                'registry_covariance_floor',
+                0.20,
+            )),
+        'registry_association_chi2_gate': float(
+            yolo_cfg.get(
+                'registry_association_chi2_gate',
+                16.0,
+            )),
+        'registry_association_max_distance': float(
+            yolo_cfg.get(
+                'registry_association_max_distance',
+                0.60,
+            )),
+        'registry_ambiguity_chi2_gate': float(
+            yolo_cfg.get(
+                'registry_ambiguity_chi2_gate',
+                36.0,
+            )),
+        'registry_ambiguity_max_distance': float(
+            yolo_cfg.get(
+                'registry_ambiguity_max_distance',
+                1.20,
+            )),
+        'registry_duplicate_minimum_bbox_iou': float(
+            yolo_cfg.get(
+                'registry_duplicate_minimum_bbox_iou',
+                0.15,
+            )),
+        'registry_duplicate_maximum_pixel_distance': float(
+            yolo_cfg.get(
+                'registry_duplicate_maximum_pixel_distance',
+                24.0,
+            )),
+        'registry_distinct_evidence_frames': int(
+            yolo_cfg.get(
+                'registry_distinct_evidence_frames',
+                5,
+            )),
+        'registry_distinct_maximum_bbox_iou': float(
+            yolo_cfg.get(
+                'registry_distinct_maximum_bbox_iou',
+                0.05,
+            )),
+        'registry_distinct_minimum_pixel_distance': float(
+            yolo_cfg.get(
+                'registry_distinct_minimum_pixel_distance',
+                35.0,
+            )),
+        'registry_bundle_inlier_threshold': float(
+            yolo_cfg.get(
+                'registry_bundle_inlier_threshold',
+                0.30,
+            )),
+        'registry_bundle_minimum_group_inlier_ratio': float(
+            yolo_cfg.get(
+                'registry_bundle_minimum_group_inlier_ratio',
+                0.55,
+            )),
+        'registry_bundle_maximum_group_median_error': float(
+            yolo_cfg.get(
+                'registry_bundle_maximum_group_median_error',
+                0.30,
+            )),
+        'registry_appearance_merge_threshold': float(
+            yolo_cfg.get(
+                'registry_appearance_merge_threshold',
+                0.12,
+            )),
+        'registry_appearance_max_distance': float(
+            yolo_cfg.get(
+                'registry_appearance_max_distance',
+                1.20,
+            )),
+        'registry_hypothesis_spatial_gate': float(
+            yolo_cfg.get(
+                'registry_hypothesis_spatial_gate',
+                0.45,
+            )),
+        'registry_hypothesis_minimum_tracklets': int(
+            yolo_cfg.get(
+                'registry_hypothesis_minimum_tracklets',
+                3,
+            )),
+        'registry_hypothesis_minimum_separation': float(
+            yolo_cfg.get(
+                'registry_hypothesis_minimum_separation',
+                0.55,
+            )),
+        'registry_hypothesis_separation_chi2': float(
+            yolo_cfg.get(
+                'registry_hypothesis_separation_chi2',
+                25.0,
+            )),
+        'registry_hypothesis_timeout': float(
+            yolo_cfg.get(
+                'registry_hypothesis_timeout',
+                45.0,
+            )),
+        'registry_tracklet_timeout': float(
+            yolo_cfg.get(
+                'registry_tracklet_timeout', 30.0)),
     }
+
     perception_runtime = mission_map.get('perception_runtime', 'native')
     if perception_runtime == 'native':
         perception_node = Node(
@@ -291,7 +458,46 @@ def _build(context, *args, **kwargs):
         }],
     )
 
-    return [crazyswarm2_launch, control_node, perception_node, gcs_node]
+    # ProcessIO text may arrive in arbitrary chunks, so keep a short rolling
+    # buffer and search across chunk boundaries. The handler is intentionally
+    # global because crazyflie_server is created inside an included launch
+    # description and is therefore not directly available here as a target
+    # action. The message is unique to crazyflie_server.
+    process_io_buffer = bytearray()
+    control_started = {'value': False}
+
+    def _start_control_when_ready(event):
+        if control_started['value']:
+            return None
+
+        process_io_buffer.extend(event.text)
+        if len(process_io_buffer) > PROCESS_IO_BUFFER_BYTES:
+            del process_io_buffer[:-PROCESS_IO_BUFFER_BYTES]
+
+        if CRAZYFLIES_READY_TEXT not in process_io_buffer:
+            return None
+
+        control_started['value'] = True
+        print(
+            '[mission_bringup] All Crazyflies fully connected; '
+            'starting control_node now.',
+            flush=True,
+        )
+        return [control_node]
+
+    start_control_on_ready = RegisterEventHandler(
+        OnProcessIO(
+            on_stdout=_start_control_when_ready,
+            on_stderr=_start_control_when_ready,
+        )
+    )
+
+    return [
+        start_control_on_ready,
+        crazyswarm2_launch,
+        perception_node,
+        gcs_node,
+    ]
 
 
 def generate_launch_description():

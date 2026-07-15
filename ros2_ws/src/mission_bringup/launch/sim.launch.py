@@ -22,14 +22,13 @@ from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
-from mission_control.coverage_plan import plan_coverage
-from mission_control.zone_split import assign_cells_to_drones, build_cells
+from mission_control.mission_planner import plan_zones
 
 # Must match control_node's `dead_zone_margin` parameter default -- both sides
-# run the exact same build_cells()/assign_cells_to_drones()/plan_coverage()
-# computation independently (rather than passing data between the launch
-# script and the node) so they always agree on where each drone's zone (and
-# therefore its home/spawn point) actually is.
+# run the exact same plan_zones() computation independently (rather than
+# passing data between the launch script and the node) so they always agree
+# on where each drone's zone (and therefore its home/spawn point) actually is,
+# whichever planner (simple/scopp) mission_map.yaml selects.
 DEAD_ZONE_MARGIN = 0.15
 
 
@@ -45,25 +44,14 @@ def _enabled_drone_ids(crazyflies_cfg):
 
 
 def _compute_homes(mission_map, drone_ids):
-    """Each drone's home/spawn point is the first cell of its own assigned
-    zone (see coverage_plan.py) -- e.g. the drone assigned the 3rd region
-    spawns inside the 3rd region, not at some unrelated point that then
-    needs a long straight commute to reach its own zone."""
-    boundary = [tuple(p) for p in mission_map['boundary']]
-    # `.get(..., [])` alone isn't enough: a bare `dead_zones:` key with no
-    # entries under it (or `dead_zones: null`) parses to a real None value in
-    # YAML, not a missing key, so the [] default never kicks in and `for dz
-    # in None` crashes. `or []` catches both "key absent" and "key present
-    # but empty/null".
-    dead_zones = [[tuple(p) for p in dz['points']] for dz in (mission_map.get('dead_zones') or [])]
-    cells = build_cells(
-        boundary, dead_zones, mission_map['coverage_line_spacing'], DEAD_ZONE_MARGIN)
-    zone_cells = assign_cells_to_drones(cells, drone_ids)
-    homes = {}
-    for drone_id in drone_ids:
-        waypoints = plan_coverage(zone_cells[drone_id])
-        homes[drone_id] = waypoints[0] if waypoints else (0.0, 0.0)
-    return homes
+    """Each drone's home/spawn point is the first waypoint of its own assigned
+    zone -- e.g. the drone assigned the 3rd region spawns inside the 3rd
+    region, not at some unrelated point that then needs a long straight
+    commute to reach its own zone. Uses the same plan_zones() facade
+    control_node runs (simple/scopp per mission_map), and reads back each
+    plan's home."""
+    plans = plan_zones(mission_map, drone_ids, DEAD_ZONE_MARGIN)
+    return {drone_id: plan.home for drone_id, plan in plans.items()}
 
 
 def _generate_crazyflies_yaml(crazyflies_cfg, homes, base_crazyflies_path):

@@ -42,8 +42,7 @@ from nav_msgs.msg import Path
 from std_msgs.msg import String
 from std_srvs.srv import Empty, Trigger
 
-from mission_control.coverage_plan import plan_coverage
-from mission_control.zone_split import assign_cells_to_drones, build_cells
+from mission_control.mission_planner import plan_zones
 
 LATCHED_QOS = QoSProfile(
     depth=1,
@@ -246,8 +245,8 @@ class ControlNode(Node):
 
         self.drones = {}
         # home_position here is just a startup placeholder -- _do_plan() below
-        # overwrites it with the actual first cell of whatever zone this drone
-        # ends up assigned, once that's known (see coverage_plan.plan_coverage).
+        # overwrites it with the actual first waypoint of whatever zone this
+        # drone ends up assigned, once that's known (see mission_planner.plan_zones).
         for drone_id in self.drone_ids:
             handle = DroneHandle(self, drone_id, [0.0, 0.0, 0.0])
             handle.wait_for_services(self, timeout_sec=5.0)
@@ -454,16 +453,14 @@ class ControlNode(Node):
             pass
 
     def _do_decompose(self):
-        boundary = [tuple(p) for p in self.mission_map['boundary']]
-        # `or []` (not just `.get(..., [])`): a bare `dead_zones:` key with
-        # nothing under it parses to None in YAML, which isn't caught by the
-        # dict default and would crash the comprehension below.
-        dead_zones = [
-            [tuple(p) for p in dz['points']] for dz in (self.mission_map.get('dead_zones') or [])
-        ]
-        cells = build_cells(
-            boundary, dead_zones, self.coverage_line_spacing, self.dead_zone_margin)
-        self.zone_cells = assign_cells_to_drones(cells, self.drone_ids)
+        # Single planner facade -- picks simple vs scopp from mission_map's
+        # `planner` field (see mission_planner.plan_zones). Both launch files'
+        # _compute_homes() call the exact same function so spawn points match
+        # the plan this node flies. zone_cells stays the {col,row,x,y} dict
+        # shape _publish_plan reads, whichever algorithm produced it.
+        self._zone_plans = plan_zones(
+            self.mission_map, self.drone_ids, self.dead_zone_margin)
+        self.zone_cells = {d: p.cells for d, p in self._zone_plans.items()}
 
     @staticmethod
     def _compress_collinear_waypoints(waypoints):
@@ -561,8 +558,11 @@ class ControlNode(Node):
 
     def _do_plan(self):
         for drone_id, handle in self.drones.items():
-            cells = self.zone_cells[drone_id]
-            handle.waypoints = plan_coverage(cells)
+            # Waypoints were already computed by the planner facade in
+            # _do_decompose (simple: boustrophedon; scopp: NN/TSP path) --
+            # waypoints[0] doubles as this drone's home, same contract for
+            # both algorithms.
+            handle.waypoints = self._zone_plans[drone_id].waypoints
             if handle.waypoints:
                 home_xy = handle.waypoints[0]
                 handle.home_position = (

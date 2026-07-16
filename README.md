@@ -79,7 +79,7 @@ uav-ugv-cooperation2/
 
 ```mermaid
 flowchart TD
-    subgraph crazyswarm2["crazyswarm2 (외부 패키지)"]
+    subgraph crazyswarm2["crazyswarm2 (external package)"]
         CFS["crazyflie_server (backend: sim | cflib)"]
     end
 
@@ -87,30 +87,31 @@ flowchart TD
         CTRL["control_node"]
     end
 
-    subgraph cfp["cf_perception (sim 또는 real 택1)"]
-        PERC["sim_perception_node 또는 real_perception_node"]
+    subgraph cfp["cf_perception (pick one: sim or real, real optionally in Docker)"]
+        PERC["sim_perception_node OR real_perception_node"]
     end
 
     subgraph gcs["gcs_dashboard"]
         GCS["gcs_node (Flask + Three.js)"]
     end
 
-    FUTURE["(추후) UGV 라우팅 노드"]
+    FUTURE["(future) UGV routing node"]
 
-    CTRL -->|"/cfN/takeoff, /cfN/land, /cfN/go_to"| CFS
-    CFS -->|"/cfN/pose (real) 또는 /tf (sim, tf2 조회)"| PERC
+    CTRL -->|"/cfN/takeoff, /cfN/land, /cfN/go_to,<br/>/cfN/upload_trajectory, /cfN/start_trajectory,<br/>/cfN/emergency (service clients)"| CFS
+    CFS -->|"/cfN/pose"| CTRL
+    CFS -->|"/cfN/pose (real) or /tf (sim, tf2 lookup)"| PERC
+    CFS -.->|"/cfN/status (real only)"| PERC
 
     PERC -->|"/states"| GCS
     PERC -->|"/detections"| CTRL
     PERC -->|"/detections"| GCS
-    PERC -.->|"/cfN/image_raw (real만)"| GCS
+    PERC -.->|"/cfN/image_raw (real only)"| GCS
+    PERC -.->|"/mission/link_status (real only)"| GCS
 
-    CTRL -->|"/mission/zones"| GCS
-    CTRL -->|"/mission/coverage_paths"| GCS
-    CTRL -->|"/mission/state"| GCS
+    CTRL -->|"/mission/zones, /mission/coverage_paths,<br/>/mission/progress, /mission/state"| GCS
     CTRL -.->|"/mission/markers"| FUTURE
 
-    GCS -->|"/mission/start (service call)"| CTRL
+    GCS -->|"/mission/start, /mission/kill<br/>(service calls)"| CTRL
 ```
 
 **토픽/서비스 요약표** (노드별 subscribe / publish):

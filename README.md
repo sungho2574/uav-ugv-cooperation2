@@ -95,7 +95,7 @@ flowchart TD
         GCS["gcs_node (Flask + Three.js)"]
     end
 
-    FUTURE["(future) UGV routing node"]
+    UGV["ugv_node (external, ST-mini)"]
 
     CTRL -->|"/cfN/takeoff, /cfN/land, /cfN/go_to,<br/>/cfN/upload_trajectory, /cfN/start_trajectory,<br/>/cfN/emergency (service clients)"| CFS
     CFS -->|"/cfN/pose"| CTRL
@@ -104,12 +104,11 @@ flowchart TD
 
     PERC -->|"/states"| GCS
     PERC -->|"/detections"| CTRL
-    PERC -->|"/detections"| GCS
+    CTRL -->|"/mission/zones, /mission/coverage_paths,<br/>/mission/progress, /mission/state,<br/>/detections"| GCS
     PERC -.->|"/cfN/image_raw (real only)"| GCS
     PERC -.->|"/mission/link_status (real only)"| GCS
 
-    CTRL -->|"/mission/zones, /mission/coverage_paths,<br/>/mission/progress, /mission/state"| GCS
-    CTRL -.->|"/mission/markers"| FUTURE
+    CTRL -->|"/mission/markers"| UGV
 
     GCS -->|"/mission/start, /mission/kill<br/>(service calls)"| CTRL
 ```

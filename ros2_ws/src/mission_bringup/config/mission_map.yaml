@@ -2,6 +2,13 @@ frame_id: map
 grid_resolution: 0.1
 uav_cruise_altitude: 0.5
 coverage_line_spacing: 0.5
+# UAV 영역할당/경로계획 알고리즘. simple = 나이브 베이스라인(세로 band 분할 +
+# boustrophedon 스윕), scopp = SCoPP 기반(Lloyd 클러스터링 + greedy auction 할당
+# + KD-tree/TSP 경로). 미지정 시 simple.
+planner: simple
+# scopp일 때만 사용하는 경로 순서 profile. paper_nn = greedy nearest-neighbour
+# (빠름, 기본), metric_tsp = grid 최단경로 TSP(경로 더 짧지만 큰 zone에서 몇 초 소요).
+coverage_profile: paper_nn
 marker_size: 0.14
 detection_backend: yolo
 perception_runtime: docker

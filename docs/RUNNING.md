@@ -59,6 +59,7 @@ colcon build --symlink-install
 - [ ] `drones` 3대의 `home_position`이 서로 다른 x좌표를 가지는지 — `zone_split.py`는 홈 위치의 x좌표 순서로 zone을 배정하므로, x좌표가 같으면 배정이 임의 순서가 될 수 있음 (예제 지도처럼 y로만 구분해도 동작은 하지만, x로도 분리해두면 더 직관적)
 - [ ] `uav_cruise_altitude`가 실제 비행 공간 천장(모션캡처 볼륨, 실내 층고 등)보다 충분히 낮은지
 - [ ] `coverage_line_spacing`이 드론 카메라 시야각/속도에 비해 너무 좁거나 넓지 않은지 (너무 좁으면 waypoint 수가 급증해 임무 시간이 길어짐)
+- [ ] `planner`가 원하는 알고리즘인지 (`simple` = 나이브 band 분할+boustrophedon 기본값 / `scopp` = SCoPP 영역할당+경로계획). `scopp`인 경우 `coverage_profile`(`paper_nn` 기본 / `metric_tsp`)도 확인. 상세는 [portable_area_allocation_and_path_planning.md](portable_area_allocation_and_path_planning.md)
 
 `ros2_ws/src/mission_bringup/config/crazyflies.yaml` 확인:
 

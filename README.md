@@ -104,7 +104,8 @@ flowchart TD
 
     PERC -->|"/states"| GCS
     PERC -->|"/detections"| CTRL
-    CTRL -->|"/mission/zones, /mission/coverage_paths,<br/>/mission/progress, /mission/state,<br/>/detections"| GCS
+    PERC -->|"/detections"| GCS
+    CTRL -->|"/mission/zones, /mission/coverage_paths,<br/>/mission/progress, /mission/state"| GCS
     PERC -.->|"/cfN/image_raw (real only)"| GCS
     PERC -.->|"/mission/link_status (real only)"| GCS
 
